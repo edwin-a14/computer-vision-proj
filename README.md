@@ -14,4 +14,5 @@
 ```bash
 source .venv/bin/activate # only if terminal isn't in venv environment
 python3 src/data_prep.py
+python3 src/hog_svm_baseline.py
 ```
