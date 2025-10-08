@@ -13,6 +13,7 @@ data/processed/
 data/annotations/
 reports/figs/
 reports/*.csv
+computations
 
 # OS / IDE
 .DS_Store
