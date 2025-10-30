@@ -64,7 +64,7 @@ def create_chips(rows):
         if chip.size == 0:
             continue
 
-        chip = cv2.cvtColor(chip, cv2.COLOR_BGR2GRAY)
+        #chip = cv2.cvtColor(chip, cv2.COLOR_BGR2GRAY)
         chip = cv2.resize(chip, (CHIP_SIZE, CHIP_SIZE), interpolation=cv2.INTER_AREA)
 
         counts[scene_id] = counts.get(scene_id, 0) + 1

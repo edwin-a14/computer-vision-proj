@@ -19,8 +19,10 @@ def load_images_by_split(split):
 
         with os.scandir(base_chip_path) as entries:
             for entry in entries:
-                img = cv2.imread(entry.path, cv2.IMREAD_GRAYSCALE)
-                hogs.append(hog(img))
+                img = cv2.imread(entry.path)
+                # Can use color or grayscale, channel axis specifies the axis of color channels
+                # Using L1 norm for block normalization instead of the default L2-Hys
+                hogs.append(hog(img, channel_axis=2, block_norm='L1'))
                 chip_labels.append(chip)
 
     return np.array(hogs), np.array(chip_labels)
