@@ -4,6 +4,10 @@ import os
 import shutil
 from scipy.signal import find_peaks
 from sklearn.cluster import DBSCAN
+from skimage.feature import hog
+from sklearn.svm import LinearSVC
+import pickle
+import joblib
 import matplotlib.colors as clr
 
 def main():
@@ -28,33 +32,43 @@ def main():
     except FileNotFoundError:
         print(f"Error: Directory not found at {directory_path}")
     
+    computations_path = os.path.join("computations","hog_svm_stop_and_bg.pkl")
+    clf = joblib.load(computations_path)
+
     # try and detect circular red things to check first
     for road_sign_image in images:
-        
+        results = []
+        bounding_boxes = []
+
         path = os.path.join(directory_path,road_sign_image)
         orig_img = cv2.imread(path)
         path = os.path.join(results_path,os.path.splitext(road_sign_image)[0])
 
         chip_counter = 0
         img = orig_img.copy()
-        color_mask = cv2.inRange(img,lower_bound_rgb,upper_bound_rgb)
+        
+        mean_adjusted_color = normalize_mean(img)
+
+        color_mask = cv2.inRange(mean_adjusted_color,lower_bound_rgb,upper_bound_rgb)
         hsv_img = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        hsv_mask = cv2.inRange(hsv_img, lower_bound_hsv, upper_bound_hsv)
+    
+        mean_adjusted_hsv = normalize_mean(hsv_img)
+
+        hsv_mask = cv2.inRange(mean_adjusted_hsv, lower_bound_hsv, upper_bound_hsv)
         
         combined_mask = cv2.bitwise_or(color_mask,hsv_mask)
         reconstructed_img = cv2.bitwise_and(orig_img, orig_img, mask=combined_mask)
         local_path = chip_path(path, chip_counter, road_sign_image)
 
-        
-        hsv_img = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        """
+        hsv_img = cv2.cvtColor(reconstructed_img, cv2.COLOR_BGR2HSV)
         hsv_img[:,:,0] = edge_Sobel(hsv_img[:,:,0])
         img = cv2.cvtColor(hsv_img,cv2.COLOR_HSV2BGR)
         
         # Non-linear blurring preserving edges
-        img = cv2.medianBlur(img, 5)    
+        #img = cv2.medianBlur(img, 5)
 
-
-        """
+        
         # Blur colors
         img = cv2.cvtColor(hsv_image, cv2.COLOR_HSV2BGR)
         img = cv2.GaussianBlur(img, (75,75),5)
@@ -62,16 +76,11 @@ def main():
         gray_thresh = 50
         img[img<gray_thresh]=0
         """
-
-        #img = cv2.Canny(img, 0.8, 0.9)
         
-
-
-        color_image = np.zeros_like(orig_img)
         # Find Connected Regions
-        img = cv2.Canny(img, 0.9, 0.95)
+        edges = cv2.Canny(reconstructed_img, 0.95, 0.99)
 
-        regions = cv2.connectedComponentsWithStats(img, 4, cv2.CV_32S)
+        regions = cv2.connectedComponentsWithStats(edges, 4, cv2.CV_32S)
         (num_labels, labels, stats, centroids) = regions
         
         # Loop through each connected component
@@ -89,7 +98,12 @@ def main():
             if area > 500:
                 # Draw the bounding box on the original image
                 #cv2.rectangle(orig_img, (x, y), (x + w, y + h), (0, 255, 0), 1)
-                cropped = orig_img[y:y+h,x:x+w]
+                side = min(h,w)
+                cropped = orig_img[y:y+side,x:x+side]
+                
+                cropped = cv2.resize(cropped, (64,64), cv2.INTER_NEAREST_EXACT)
+                results.append(cropped)
+                bounding_boxes.append((x,y,w,h))
                 local_path = chip_path(path, chip_counter, road_sign_image)
 
                 cv2.imwrite(local_path,cropped)
@@ -108,24 +122,36 @@ def main():
         
         
         
-        remove_previous_chips(path, chip_counter, road_sign_image)
-        continue
-        """
         
+        
+        gray_image = cv2.cvtColor(reconstructed_img, cv2.COLOR_BGR2GRAY)
+        edges = edge_Sobel(gray_image)
         # Find contours
-        contours, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         # Loop through contours and draw bounding boxes
         for contour in contours:
-            # Get the bounding rectangle for the contour
-            x, y, w, h = cv2.boundingRect(contour)
+            if cv2.contourArea(contour)>500:
+                # Get the bounding rectangle for the contour
+                x, y, w, h = cv2.boundingRect(contour)
         
-            # Draw the rectangle on the original image
-            cv2.rectangle(orig_img, (x, y), (x + w, y + h), (0, 255, 0), 2) # Green color, 2 pixels thick    
+                # Draw the rectangle on the original image
+                #cv2.rectangle(orig_img, (x, y), (x + w, y + h), (0, 255, 0), 2) # Green color, 2 pixels thick    
+                side = min(h,w)
+                cropped = orig_img[y:y+side,x:x+side]
 
+                cropped = cv2.resize(cropped, (64,64), cv2.INTER_NEAREST_EXACT)
+                results.append(cropped)
+                bounding_boxes.append((x,y,w,h))
+                local_path = chip_path(path, chip_counter, road_sign_image)
+
+                cv2.imwrite(local_path,cropped)
+                chip_counter+=1
+            
         #cv2.imwrite("data/processed/colors/red/road"+str(road_sign_num)+"_r.png",orig_img)
         #continue
-        """
+        
+        
 
         #img = (orig_img[:,:,0]).copy()	
         # Setup SimpleBlobDetector parameters
@@ -155,20 +181,37 @@ def main():
         detector = cv2.SimpleBlobDetector_create(params)
         
         # Detect blobs
-        keypoints = detector.detect(img)
+        keypoints = detector.detect(orig_img)
         
         # Draw blobs as green circles
-        output = cv2.drawKeypoints(orig_img, keypoints, np.array([]), (255, 0, 0),
+        output = cv2.drawKeypoints(np.zeros_like(orig_img,dtype=np.uint8), keypoints, np.array([]), (255,0,0),
                                 cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+        output = output[:,:,0]
+        circles = cv2.HoughCircles(output,cv2.HOUGH_GRADIENT, 2, 16, 0.9, 0.95)
+        if circles.shape[0]==1:
+            for circle in circles[0,:]:
+                x, y, r = circle
+                r*=1.2
+                if r>100:
+                    try:
+                        cropped = orig_img[int(y-r):int(y+r),int(x-r),int(x+r)]
 
-        cv2.imwrite("data/processed/colors/red/road"+str(road_sign_num)+"_r.png",output)
-        continue
+                        cropped = cv2.resize(cropped, (64,64), cv2.INTER_NEAREST_EXACT)
+                        results.append(cropped)
+                        bounding_boxes.append((x,y,r*2,r*2))
+                        local_path = chip_path(path, chip_counter, road_sign_image)
 
+                        cv2.imwrite(local_path,cropped)
+                        chip_counter+=1
+                    except Exception as e:
+                        pass
+
+        img = reconstructed_img.copy()
         r = img[:,:,2]
         g = img[:,:,1]
         b = img[:,:,0]
         img[(g>=r)|(b>=r)]=0
-        white = cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
+        #white = cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
         #white[white<200]=0
 
         max_red = np.max(r)
@@ -180,25 +223,14 @@ def main():
         
         #r[white>200]=white[white>200]
 
-        img = r
-        #cv2.imwrite("data/processed/colors/red/road"+str(road_sign_num)+"_r.png",img)
-        #continue
+        red_image = r
+        red_image = cv2.GaussianBlur(red_image,(9,9),2)
+        edges = cv2.Canny(red_image,0.9, 0.95)
 
-        """
-        #img = cv2.Canny(r,0.6, 0.9)
-        circles = cv2.HoughCircles(r.astype(np.uint8),cv2.HOUGH_GRADIENT, 2, 16, 0.9, 0.95)
-        """
-        
-        img = cv2.GaussianBlur(img,(9,9),2)
-        img = cv2.Canny(img,0.9, 0.95)
 
-        #cv2.imwrite("data/processed/colors/red/road"+str(road_sign_num)+"_r.png",img)
-        #continue
-
-        contours, hierarchy = cv2.findContours(img, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        contours, hierarchy = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
         max_area = 0.
         valid = []
-        img = cv2.imread(path)
         for contour in contours:
             area = cv2.contourArea(contour)
             perimeter = cv2.arcLength(contour, True) # True for closed contour
@@ -207,27 +239,65 @@ def main():
             if perimeter > 0:
                 circularity = (4 * np.pi * area) / (perimeter * perimeter)
                 if circularity>0.6:
-                    max_area=max(max_area,area)
-                    valid.append(contour)
-        if len(valid)==0:
-            continue
-        
+                    if area>300:
+                        max_area=max(max_area,area)
+                        valid.append(contour)
+
         for contour in valid:
             if cv2.contourArea(contour)>=0.9*max_area:
-                img=cv2.drawContours(img,[contour],0,(0,255,0),1)
-
-        """
-        circles = cv2.HoughCircles(img,cv2.HOUGH_GRADIENT, 2, 16, 0.9, 0.95)
-        shape = np.shape(circles)
-        if shape[0]==4:
-            continue
-        circles = circles[0]
-        img = cv2.imread(path)
-        for circle in circles[:]:
-            img = cv2.circle(img,(int(circle[0]),int(circle[1])),int(circle[2]),(0, 255, 0), 1)
-        """
-        cv2.imwrite("data/processed/colors/red/road"+str(road_sign_num)+"_r.png",img)
+                # Get the bounding rectangle for the contour
+                x, y, w, h = cv2.boundingRect(contour)
         
+                # Draw the rectangle on the original image
+                #cv2.rectangle(orig_img, (x, y), (x + w, y + h), (0, 255, 0), 2) # Green color, 2 pixels thick    
+                side = min(h,w)
+                cropped = orig_img[y:y+side,x:x+side]
+                cropped = cv2.resize(cropped, (64,64), cv2.INTER_NEAREST_EXACT)
+                results.append(cropped)
+                bounding_boxes.append((x,y,w,h))
+                local_path = chip_path(path, chip_counter, road_sign_image)
+
+                cv2.imwrite(local_path,cropped)
+                chip_counter+=1
+
+        
+        """
+        circles = cv2.HoughCircles(cv2.cvtColor(reconstructed_img,cv2.COLOR_BGR2GRAY),cv2.HOUGH_GRADIENT, 2, 16, 0.9, 0.95)
+        if circles.shape[0]==1:
+            for circle in circles[0,:]:
+                x, y, r = circle
+                if r>100:
+                    try:
+                        cropped = orig_img[int(y-r):int(y+r),int(x-r),int(x+r)]
+                        cropped = cv2.resize(cropped, (64,64), cv2.INTER_NEAREST_EXACT)
+                        results.append(cropped)
+                        bounding_boxes.append((x,y,r*2,r*2))
+                        local_path = chip_path(path, chip_counter, road_sign_image)
+
+                        cv2.imwrite(local_path,cropped)
+                        chip_counter+=1
+                    except Exception as e:
+                        pass
+        """
+        remove_previous_chips(path, chip_counter, road_sign_image)
+        
+        cv2.imwrite(os.path.join(path, "result.png"),test(results, bounding_boxes, orig_img, clf))
+        
+
+def test(results: list, bounding_boxes: list, orig_img:cv2.Mat, clf: LinearSVC):
+    hogs = []
+    for result in results:
+        hogs.append(hog(result, channel_axis=2, block_norm='L1'))
+    
+    predictions = clf.predict(np.array(hogs))
+    for i in range(len(predictions)):
+        if predictions[i]!='stop':
+            continue
+        x,y,w,h = bounding_boxes[i]
+        orig_img = cv2.rectangle(orig_img,(x,y),(x+w,y+h),(0,255,0),1)
+    return orig_img
+
+
 def learn():
     directory = find_exact_contours()
     return collect_stats(directory)
@@ -485,6 +555,17 @@ def replace_color(img: cv2.Mat, lower_bound: tuple, upper_bound: tuple, to_color
     original_not_color = cv2.bitwise_and(img, img, mask=mask2)
 
     return cv2.add(original_not_color, color_replacement)
+
+def normalize_mean(img: cv2.Mat):
+    if img.shape[2]==3:
+        mean_img = np.array((np.mean(img[:,:,0]),np.mean(img[:,:,1]),np.mean(img[:,:,2])),dtype=np.float32)
+        mean_img = np.array((127,127,127),dtype=np.float32)-mean_img
+        return (img.astype(np.float32)+mean_img).astype(np.uint8)
+    elif img.shape[2]==1:
+        mean_val = np.mean(img, dtype=np.float32)
+        mean_val = np.array((127),dtype=np.float32)-mean_val
+        return (img.astype(np.float32)+mean_val).astype(np.uint8)
+    return None
 
 if __name__ == "__main__": 
     main()
