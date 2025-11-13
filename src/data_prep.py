@@ -9,7 +9,8 @@ label_normalization = {
     'stop': 'stop',
 }
 
-CHIP_SIZE = 64
+# Increased from 64 to 128 for better detail preservation
+CHIP_SIZE = 128
 
 # Reads annotation xml files from kaggle, outputs csv with xml data flattened into rows
 # with each row corresponding to an object in the scene image
