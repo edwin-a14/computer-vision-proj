@@ -14,8 +14,72 @@ import joblib
 import matplotlib.colors as clr
 from typing import Optional, Union
 from cnn_model import CNNClassifier
+import glob
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+_sift = None
+_sift_ref_descriptors = [] # List of descriptors for multiple reference images
+_sift_matcher = None
+
+def init_sift_verifier(ref_img_paths=None):
+    global _sift, _sift_ref_descriptors, _sift_matcher
+    
+    if ref_img_paths is None:
+        # Theres prob a better way to select the reference images, but for now use top 5 stop sign chips
+        files = glob.glob('data/processed/chips/train/stop/*.png')
+        files.sort()
+        ref_img_paths = files[:5] if files else []
+
+    try:
+        _sift = cv2.SIFT_create()
+        _sift_ref_descriptors = []
+        
+        for path in ref_img_paths:
+            ref_img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+            
+            kp, des = _sift.detectAndCompute(ref_img, None)
+            if des is not None and len(des) > 0:
+                _sift_ref_descriptors.append(des)
+        
+        FLANN_INDEX_KDTREE = 1
+        index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+        search_params = dict(checks=50)
+        _sift_matcher = cv2.FlannBasedMatcher(index_params, search_params)
+        
+    except Exception as e:
+        logging.warning(f"Failed to initialize SIFT verifier: {e}")
+
+def verify_with_sift(chip_img, min_matches=2):
+    global _sift, _sift_ref_descriptors, _sift_matcher
+    
+    if _sift is None or not _sift_ref_descriptors:
+        return True
+        
+    try:
+        gray = cv2.cvtColor(chip_img, cv2.COLOR_BGR2GRAY)
+        kp, des = _sift.detectAndCompute(gray, None)
+        
+        if des is None or len(des) < 2:
+            return False
+            
+        # Check against all reference images, if any reference image has enough matches, we accept it
+        for ref_des in _sift_ref_descriptors:
+            matches = _sift_matcher.knnMatch(ref_des, des, k=2)
+            
+            good_matches = 0
+            for m_n in matches:
+                if len(m_n) != 2: continue
+                m, n = m_n
+                if m.distance < 0.7 * n.distance:
+                    good_matches += 1
+            
+            if good_matches >= min_matches:
+                return True
+                
+        return False
+    except Exception as e:
+        return False
 
 def non_max_suppression(boxes, scores, overlap_thresh=0.3):
     if len(boxes) == 0:
@@ -225,7 +289,7 @@ def calculate_shape_score(contour):
     
     return score
 
-def extract_chip_with_padding(img, x, y, w, h, target_size=128, padding_ratio=0.1):
+def extract_chip_with_padding(img, x, y, w, h, target_size=128, padding_ratio=0.1, keep_aspect_ratio=True):
     # Extract a chip from an image with padding and proper resizing.
     # Maintains aspect ratio and adds context around the detection.
 
@@ -250,6 +314,14 @@ def extract_chip_with_padding(img, x, y, w, h, target_size=128, padding_ratio=0.
     if cropped.size == 0 or cropped.shape[0] < 2 or cropped.shape[1] < 2:
         return None
     
+    # If we don't care about aspect ratio (e.g. for CNN trained on distorted crops),
+    # just resize directly.
+    if not keep_aspect_ratio:
+        try:
+            return cv2.resize(cropped, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
+        except Exception:
+            return None
+
     # Resize to target size maintaining aspect ratio with padding
     h_crop, w_crop = cropped.shape[:2]
     
@@ -368,6 +440,9 @@ def main(classifier_type: str = 'hog', cnn_model_path: Optional[str] = None,
             logging.error(f"Failed to load HOG-SVM classifier: {e}")
             return
 
+    if classifier_type.lower() in ['cnn', 'ensemble']:
+        init_sift_verifier()
+
     total_images = len(images)
     detection_stats = {
         'total_images': total_images,
@@ -382,7 +457,7 @@ def main(classifier_type: str = 'hog', cnn_model_path: Optional[str] = None,
         
         try:
             num_detections = process_single_image(road_sign_image, directory_path, results_path, clf, 
-                                                 classifier_type=classifier_type)
+                                                 classifier_type=classifier_type, cnn_threshold=cnn_threshold)
             if num_detections > 0:
                 detection_stats['images_with_detections'] += 1
                 detection_stats['total_detections'] += num_detections
@@ -406,8 +481,40 @@ def main(classifier_type: str = 'hog', cnn_model_path: Optional[str] = None,
     
     return detection_stats
 
+def detect_and_classify_frame(orig_img, clf, classifier_type='hog', cnn_threshold=0.85, output_path=None, file_name=None, scales=None):
+    results = []
+    bounding_boxes = []
+    detection_scores = []
+    
+    if scales is None:
+        scales = [0.3, 0.5, 0.7, 0.9, 1.0, 1.2, 1.5, 1.8]
+    
+    # Step 1: Multi-scale detection
+    candidates = detect_multiscale(orig_img, scales=scales)
+    
+    # Step 2: Extract chips
+    for (x, y, w, h), shape_score in candidates:
+        chip = extract_chip_with_padding(orig_img, x, y, w, h, target_size=128, padding_ratio=0.0, keep_aspect_ratio=False)
+        if chip is not None:
+            results.append(chip)
+            bounding_boxes.append((x, y, w, h))
+            detection_scores.append(shape_score)
+    
+    # Step 3: Apply Non-Maximum Suppression
+    final_scores = []
+    if len(bounding_boxes) > 0:
+        keep_indices = non_max_suppression(bounding_boxes, detection_scores, overlap_thresh=0.3)
+        results = [results[i] for i in keep_indices]
+        bounding_boxes = [bounding_boxes[i] for i in keep_indices]
+        final_scores = [detection_scores[i] for i in keep_indices]
+    
+    # Step 4: Classify and draw final detections
+    final_img, num_detections = test(results, bounding_boxes, final_scores, orig_img.copy(), clf, classifier_type, cnn_threshold, output_path, file_name)
+    
+    return final_img, num_detections
+
 def process_single_image(road_sign_image, directory_path, results_path, clf, 
-                        classifier_type: str = 'hog'):
+                        classifier_type: str = 'hog', cnn_threshold: float = 0.85):
 
     path = os.path.join(directory_path, road_sign_image)
     orig_img = cv2.imread(path)
@@ -418,59 +525,29 @@ def process_single_image(road_sign_image, directory_path, results_path, clf,
     
     output_path = os.path.join(results_path, os.path.splitext(road_sign_image)[0])
     
-    chip_counter = 0
-    results = []
-    bounding_boxes = []
-    detection_scores = []
+    # Clean up previous results
+    remove_previous_chips(output_path, 0, road_sign_image)
     
-    # Step 1: Multi-scale detection
-    # Detect candidates at multiple scales (0.3x to 1.8x) for comprehensive coverage
-    # More scales provide better coverage of different sign sizes
-    candidates = detect_multiscale(orig_img, scales=[0.3, 0.5, 0.7, 0.9, 1.0, 1.2, 1.5, 1.8])
-    
-    # Step 2: Process each candidate through the classifier
-    for (x, y, w, h), shape_score in candidates:
-        
-        # Extract chip with padding
-        chip = extract_chip_with_padding(orig_img, x, y, w, h, target_size=128, padding_ratio=0.15)
-        
-        if chip is not None:
-            results.append(chip)
-            bounding_boxes.append((x, y, w, h))
-            detection_scores.append(shape_score)
-            
-            # Save chip
-            local_path = chip_path(output_path, chip_counter, road_sign_image)
-            cv2.imwrite(local_path, chip)
-            chip_counter += 1
-    
-    # Step 3: Apply Non-Maximum Suppression (already done in detect_multiscale, but apply again for safety)
-    if len(bounding_boxes) > 0:
-        keep_indices = non_max_suppression(bounding_boxes, detection_scores, overlap_thresh=0.3)
-        
-        # Filter results based on NMS
-        results = [results[i] for i in keep_indices]
-        bounding_boxes = [bounding_boxes[i] for i in keep_indices]
-    
-    # Step 4: Classify and draw final detections
-    remove_previous_chips(output_path, chip_counter, road_sign_image)
-    
-    final_img, num_detections = test(results, bounding_boxes, orig_img.copy(), clf, classifier_type)
+    final_img, num_detections = detect_and_classify_frame(orig_img, clf, classifier_type, cnn_threshold, output_path, road_sign_image)
     cv2.imwrite(os.path.join(output_path, "result.png"), final_img)
     
     return num_detections
 
 
-def test(results: list, bounding_boxes: list, orig_img, clf, classifier_type: str = 'hog'):
+def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, classifier_type: str = 'hog', cnn_threshold: float = 0.85, output_path=None, file_name=None):
     """
     Test detected chips using either HOG-SVM or CNN classifier, or ensemble.
     
     Args:
         results: List of cropped image chips
         bounding_boxes: List of bounding boxes corresponding to chips
+        scores: List of shape scores corresponding to chips
         orig_img: Original image to draw on
         clf: Classifier (HOG-SVM, CNN, or tuple of both for ensemble)
         classifier_type: 'hog', 'cnn', or 'ensemble'
+        cnn_threshold: Confidence threshold for CNN
+        output_path: Path to save detected chips
+        file_name: Original image filename
     """
     if len(results) == 0:
         return orig_img, 0
@@ -530,19 +607,45 @@ def test(results: list, bounding_boxes: list, orig_img, clf, classifier_type: st
             if len(valid_results) > 0:
                 cnn_preds, cnn_confs = cnn_clf.predict_with_confidence(np.array(valid_results))
             else:
-                cnn_preds = []
-                cnn_confs = []
+                cnn_preds, cnn_confs = [], []
             
-            # Only accept detections where both agree
+            # Smart Ensemble Logic: Combine classifiers + SIFT verification
             for j, idx in enumerate(valid_indices):
                 if j < len(hog_predictions) and j < len(cnn_preds):
-                    if hog_predictions[j] == 'stop' and cnn_preds[j] == 'stop' and cnn_confs[j] >= 0.75:
-                        num_detections += 1
-                        x, y, w, h = bounding_boxes[idx]
-                        orig_img = cv2.rectangle(orig_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                        label = f'STOP {cnn_confs[j]:.2f}'
-                        cv2.putText(orig_img, label, (x, y - 10), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    
+                    is_stop = False
+                    confidence = cnn_confs[j]
+                    #shape_score = scores[idx] if idx < len(scores) else 0
+                    required_matches = 2
+                    
+                    # If strong CNN confidence, trust it
+                    if cnn_preds[j] == 'stop' and confidence > 0.50:
+                        is_stop = True
+                        required_matches = 0
+                        
+                    # Moderate CNN + Minimal Verification
+                    # If CNN is > 0.50, we just need one SIFT match or HOG agreement
+                    elif cnn_preds[j] == 'stop' and confidence > 0.50:
+                        if hog_predictions[j] == 'stop':
+                            is_stop = True
+                            required_matches = 0 # HOG confirms it
+                        else:
+                            is_stop = True
+                            required_matches = 1 # Just 1 SIFT match needed
+                    
+                    if is_stop:
+                        # Verify with SIFT if required
+                        if required_matches == 0 or verify_with_sift(results[idx], min_matches=required_matches):
+                            num_detections += 1
+                            x, y, w, h = bounding_boxes[idx]
+                            orig_img = cv2.rectangle(orig_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                            label = f'ENS {confidence:.2f}'
+                            cv2.putText(orig_img, label, (x, y - 10), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                            
+                            if output_path and file_name:
+                                chip_path_str = chip_path(output_path, num_detections, file_name)
+                                cv2.imwrite(chip_path_str, results[idx])
         except Exception as e:
             logging.error(f"Error during ensemble classification: {e}")
         
@@ -557,7 +660,15 @@ def test(results: list, bounding_boxes: list, orig_img, clf, classifier_type: st
             # Get predictions with confidence scores
             predictions, confidences = clf.predict_with_confidence(chips_array)
             
-            confidence_threshold = 0.40
+            logging.info(f"CNN Predictions: {list(zip(predictions, confidences))}")
+
+            # DEBUG: Uncomment to save chips
+            # debug_dir = "debug_chips"
+            # os.makedirs(debug_dir, exist_ok=True)
+            # for i, chip in enumerate(results):
+            #     cv2.imwrite(os.path.join(debug_dir, f"chip_{i}.png"), chip)
+            
+            confidence_threshold = cnn_threshold if cnn_threshold is not None else 0.85
             
             # Draw detections for predictions meeting threshold
             for i, (pred, conf) in enumerate(zip(predictions, confidences)):
@@ -568,7 +679,11 @@ def test(results: list, bounding_boxes: list, orig_img, clf, classifier_type: st
                     # Add label with confidence
                     label = f'STOP {conf:.2f}'
                     cv2.putText(orig_img, label, (x, y - 10), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    
+                    if output_path and file_name:
+                        chip_path_str = chip_path(output_path, num_detections, file_name)
+                        cv2.imwrite(chip_path_str, results[i])
         except Exception as e:
             logging.error(f"Error during CNN classification: {e}")
         
@@ -643,6 +758,10 @@ def test(results: list, bounding_boxes: list, orig_img, clf, classifier_type: st
                 # Add label
                 cv2.putText(orig_img, 'STOP', (x, y - 10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                
+                if output_path and file_name:
+                    chip_path_str = chip_path(output_path, num_detections, file_name)
+                    cv2.imwrite(chip_path_str, results[pred_idx])
     except Exception as e:
         logging.error(f"Error during classification: {e}")
     
