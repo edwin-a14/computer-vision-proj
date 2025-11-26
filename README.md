@@ -89,6 +89,34 @@ python3 src/evaluate_detections.py
 python3 src/compare_classifiers.py
 ```
 
+### 7. Hard Negative Mining
+
+Mining "hard negatives" (i.e. false positives) from our detections and add them to the training set.
+
+1. Run detections using the ensemble classifier:
+   ```bash
+   python3 src/detect_color_shape.py --classifier ensemble
+   ```
+
+2. Run the mining script to collect false positives from images that don't contain stop signs:
+   ```bash
+   python3 src/mine_hard_negatives.py
+   ```
+   This will copy false positive chips to `data/processed/chips/train/bg`.
+
+3. Re-train CNN classifier
+
+### 8. Video Processing
+
+```bash
+python3 src/process_video.py \
+    --input data/raw/videos \
+    --output data/processed/videos \
+    --classifier cnn \
+    --width 800 \
+    --skip 3
+```
+
 ## Project Structure
 
 ```

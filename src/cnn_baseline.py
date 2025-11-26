@@ -287,6 +287,15 @@ def run_one_epoch(model, loader, criterion, optimizer=None, device='cuda', amp=T
 def train_model(train_loader, val_loader, config, device='cuda'):
     model = SmallCNNPlus(dropout=config['dropout']).to(device)
     
+    if config.get('resume', False):
+        checkpoint_path = Path(config['checkpoint_dir']) / 'best_model.pth'
+        if checkpoint_path.exists():
+            logging.info(f"Resuming from checkpoint: {checkpoint_path}")
+            state_dict = torch.load(checkpoint_path, map_location=device)
+            model.load_state_dict(state_dict)
+        else:
+            logging.warning(f"Checkpoint not found at {checkpoint_path}, starting from scratch.")
+    
     # Loss function
     criterion = nn.BCEWithLogitsLoss()
     
@@ -417,7 +426,8 @@ def main():
         'amp': True,
         'patience': 10,
         'metric_for_best': 'pr_auc',
-        'checkpoint_dir': 'computations/cnn_checkpoints'
+        'checkpoint_dir': 'computations/cnn_checkpoints',
+        'resume': True
     }
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
