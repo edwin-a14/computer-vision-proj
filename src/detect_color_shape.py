@@ -509,9 +509,9 @@ def detect_and_classify_frame(orig_img, clf, classifier_type='hog', cnn_threshol
         final_scores = [detection_scores[i] for i in keep_indices]
     
     # Step 4: Classify and draw final detections
-    final_img, num_detections = test(results, bounding_boxes, final_scores, orig_img.copy(), clf, classifier_type, cnn_threshold, output_path, file_name)
+    final_img, num_detections, detected_boxes = test(results, bounding_boxes, final_scores, orig_img.copy(), clf, classifier_type, cnn_threshold, output_path, file_name)
     
-    return final_img, num_detections
+    return final_img, num_detections, detected_boxes
 
 def process_single_image(road_sign_image, directory_path, results_path, clf, 
                         classifier_type: str = 'hog', cnn_threshold: float = 0.85):
@@ -528,7 +528,7 @@ def process_single_image(road_sign_image, directory_path, results_path, clf,
     # Clean up previous results
     remove_previous_chips(output_path, 0, road_sign_image)
     
-    final_img, num_detections = detect_and_classify_frame(orig_img, clf, classifier_type, cnn_threshold, output_path, road_sign_image)
+    final_img, num_detections, _ = detect_and_classify_frame(orig_img, clf, classifier_type, cnn_threshold, output_path, road_sign_image)
     cv2.imwrite(os.path.join(output_path, "result.png"), final_img)
     
     return num_detections
@@ -548,9 +548,15 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
         cnn_threshold: Confidence threshold for CNN
         output_path: Path to save detected chips
         file_name: Original image filename
+        
+    Returns:
+        orig_img: Annotated image
+        num_detections: Number of detections
+        detected_boxes: List of detected bounding boxes [(x, y, w, h), ...]
     """
+    detected_boxes = []
     if len(results) == 0:
-        return orig_img, 0
+        return orig_img, 0, []
     
     num_detections = 0
     
@@ -638,6 +644,7 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
                         if required_matches == 0 or verify_with_sift(results[idx], min_matches=required_matches):
                             num_detections += 1
                             x, y, w, h = bounding_boxes[idx]
+                            detected_boxes.append((x, y, w, h))
                             orig_img = cv2.rectangle(orig_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
                             label = f'ENS {confidence:.2f}'
                             cv2.putText(orig_img, label, (x, y - 10), 
@@ -649,7 +656,7 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
         except Exception as e:
             logging.error(f"Error during ensemble classification: {e}")
         
-        return orig_img, num_detections
+        return orig_img, num_detections, detected_boxes
     
     # Use CNN classifier
     if classifier_type.lower() == 'cnn':
@@ -675,6 +682,7 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
                 if pred == 'stop' and conf >= confidence_threshold:
                     num_detections += 1
                     x, y, w, h = bounding_boxes[i]
+                    detected_boxes.append((x, y, w, h))
                     orig_img = cv2.rectangle(orig_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
                     # Add label with confidence
                     label = f'STOP {conf:.2f}'
@@ -687,7 +695,7 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
         except Exception as e:
             logging.error(f"Error during CNN classification: {e}")
         
-        return orig_img, num_detections
+        return orig_img, num_detections, detected_boxes
     
     # Use HOG-SVM classifier
     features = []
@@ -753,6 +761,7 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
             if predictions[j] == 'stop':
                 num_detections += 1
                 x, y, w, h = bounding_boxes[pred_idx]
+                detected_boxes.append((x, y, w, h))
                 # Draw green rectangle for stop sign detections
                 orig_img = cv2.rectangle(orig_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
                 # Add label
@@ -765,7 +774,7 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
     except Exception as e:
         logging.error(f"Error during classification: {e}")
     
-    return orig_img, num_detections
+    return orig_img, num_detections, detected_boxes
 
 
 def chip_path(directory: str, index: int, file_name: str):

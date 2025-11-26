@@ -11,6 +11,7 @@ from detect_color_shape import (
     detect_and_classify_frame,
     init_sift_verifier
 )
+from action_inference import determine_driver_action
 from cnn_model import CNNClassifier
 from skimage.feature import hog
 
@@ -102,7 +103,13 @@ def process_video(input_path, output_path, classifier_type='ensemble', frame_ski
             frame = cv2.resize(frame, (new_width, new_height))
         
         if frame_count % frame_skip == 0:
-            processed_frame, num_dets = detect_and_classify_frame(frame, clf, classifier_type, cnn_threshold=0.50, scales=video_scales)
+            processed_frame, num_dets, detections = detect_and_classify_frame(frame, clf, classifier_type, cnn_threshold=0.50, scales=video_scales)
+            
+            action, color = determine_driver_action(detections, new_width, new_height)
+            
+            cv2.putText(processed_frame, f"ACTION: {action}", (50, 50), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.5, color, 3)
+            
             last_processed_frame = processed_frame
             total_detections += num_dets
         else:
@@ -132,10 +139,16 @@ def main():
     os.makedirs(args.output, exist_ok=True)
 
     video_extensions = ('.mp4')
-    files = [f for f in os.listdir(args.input) if f.lower().endswith(video_extensions)]
+    
+    if os.path.isfile(args.input):
+        files = [os.path.basename(args.input)]
+        input_dir = os.path.dirname(args.input)
+    else:
+        files = [f for f in os.listdir(args.input) if f.lower().endswith(video_extensions)]
+        input_dir = args.input
 
     for f in files:
-        in_path = os.path.join(args.input, f)
+        in_path = os.path.join(input_dir, f)
         out_path = os.path.join(args.output, f"processed_{args.classifier}_{f}")
             
         process_video(in_path, out_path, args.classifier, args.skip, args.width)
