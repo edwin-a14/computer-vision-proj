@@ -13,6 +13,7 @@ from detect_color_shape import (
 )
 from action_inference import determine_driver_action
 from cnn_model import CNNClassifier
+from speed_estimation import SpeedEstimator
 from skimage.feature import hog
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -87,12 +88,16 @@ def process_video(input_path, output_path, classifier_type='ensemble', frame_ski
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(output_path, fourcc, fps, (new_width, new_height))
     
+    speed_est = SpeedEstimator(new_width, new_height, fps)
+    
     pbar = tqdm(total=total_frames)
 
     video_scales = [0.4, 0.7, 1.0, 1.3]
     
     frame_count = 0
-    last_processed_frame = None
+    last_detected_boxes = []
+    last_action = "Unknown"
+    last_action_color = (0, 255, 0)
     total_detections = 0
     
     while cap.isOpened():
@@ -101,6 +106,8 @@ def process_video(input_path, output_path, classifier_type='ensemble', frame_ski
         
         if scale_factor != 1.0:
             frame = cv2.resize(frame, (new_width, new_height))
+            
+        speed_est.estimate_speed(frame)
         
         if frame_count % frame_skip == 0:
             processed_frame, num_dets, detections = detect_and_classify_frame(frame, clf, classifier_type, cnn_threshold=0.50, scales=video_scales)
@@ -110,13 +117,30 @@ def process_video(input_path, output_path, classifier_type='ensemble', frame_ski
             cv2.putText(processed_frame, f"ACTION: {action}", (50, 50), 
                        cv2.FONT_HERSHEY_SIMPLEX, 1.5, color, 3)
             
-            last_processed_frame = processed_frame
+            if detections:
+                # Find largest detection (closest stop sign)
+                largest_det = max(detections, key=lambda b: b[2] * b[3])
+                speed_est.process_stop_sign(largest_det, frame_count)
+            
+            last_detected_boxes = detections
+            last_action = action
+            last_action_color = color
             total_detections += num_dets
         else:
-            if last_processed_frame is not None:
-                processed_frame = last_processed_frame
-            else:
-                processed_frame = frame
+            # Use current frame but draw last known detections
+            processed_frame = frame.copy()
+            
+            for (x, y, w, h) in last_detected_boxes:
+                cv2.rectangle(processed_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                # We don't have the exact confidence score here, but we can label it
+                cv2.putText(processed_frame, "Stop", (x, y - 10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.9, (36, 255, 12), 2)
+            
+            # Draw last known action
+            cv2.putText(processed_frame, f"ACTION: {last_action}", (50, 50), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.5, last_action_color, 3)
+        
+        speed_est.draw_speed(processed_frame)
                 
         out.write(processed_frame)
         pbar.update(1)
