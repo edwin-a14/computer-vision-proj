@@ -667,8 +667,6 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
             # Get predictions with confidence scores
             predictions, confidences = clf.predict_with_confidence(chips_array)
             
-            logging.info(f"CNN Predictions: {list(zip(predictions, confidences))}")
-
             # DEBUG: Uncomment to save chips
             # debug_dir = "debug_chips"
             # os.makedirs(debug_dir, exist_ok=True)
