@@ -9,3 +9,6 @@ tqdm
 pyyaml
 scikit-image
 albumentations
+Flask
+flask-socketio
+simple-websocket
