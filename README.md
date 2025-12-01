@@ -109,13 +109,37 @@ Mining "hard negatives" (i.e. false positives) from our detections and add them 
 ### 8. Video Processing
 
 ```bash
-python3 src/process_video.py \
-    --input data/raw/videos \
-    --output data/processed/videos \
-    --classifier cnn \
-    --width 800 \
+python src/process_video.py 
+    --input data/raw/videos/DrivingClip1.mp4 
+    --output data/processed/videos 
+    --classifier hog 
+    --width 800 
+    --skip 3
+
+python src/process_video.py 
+    --input data/raw/videos/DrivingClip1.mp4 
+    --output data/processed/videos 
+    --classifier cnn 
+    --width 800 
+    --skip 3
+
+python src/process_video.py 
+    --input data/raw/videos/DrivingClip1.mp4 
+    --output data/processed/videos 
+    --classifier ensemble 
+    --width 800 
     --skip 3
 ```
+
+### 9. Web Interface (Real-time)
+
+To start the real-time streaming interface:
+
+```bash
+python src/web/app.py
+```
+
+Navigate to `http://127.0.0.1:5001` in your browser.
 
 ## Project Structure
 

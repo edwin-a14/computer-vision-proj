@@ -13,8 +13,7 @@ from detect_color_shape import (
 )
 from action_inference import determine_driver_action
 from cnn_model import CNNClassifier
-from speed_estimation import SpeedEstimator
-from lane_detection import LaneDetector
+from video_processor import VideoProcessor
 from skimage.feature import hog
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -28,7 +27,7 @@ def load_classifiers(classifier_type='ensemble', cnn_path='computations/cnn_chec
             hog_clf = joblib.load(hog_path)
 
             if not os.path.exists(cnn_path):
-                logging.warning(f"Model {cnn_path} not found, trying best_model.pth")
+                logging.warning("Model {} not found, trying best_model.pth".format(cnn_path))
                 cnn_path = cnn_path.replace("last_model.pth", "best_model.pth")
             
             cnn_clf = CNNClassifier(model_path=cnn_path, input_size=224)
@@ -41,7 +40,7 @@ def load_classifiers(classifier_type='ensemble', cnn_path='computations/cnn_chec
         logging.info("Loading CNN classifier...")
         try:
             if not os.path.exists(cnn_path):
-                logging.warning(f"Model {cnn_path} not found, trying best_model.pth")
+                logging.warning("Model {} not found, trying best_model.pth".format(cnn_path))
                 cnn_path = cnn_path.replace("last_model.pth", "best_model.pth")
             clf = CNNClassifier(model_path=cnn_path, input_size=224)
         except Exception as e:
@@ -89,19 +88,10 @@ def process_video(input_path, output_path, classifier_type='ensemble', frame_ski
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(output_path, fourcc, fps, (new_width, new_height))
     
-    speed_est = SpeedEstimator(new_width, new_height, fps)
-    lane_det = LaneDetector(new_width, new_height)
+    processor = VideoProcessor(new_width, new_height, fps, classifier_type)
+    processor.frame_skip = frame_skip
     
     pbar = tqdm(total=total_frames)
-
-    video_scales = [0.4, 0.7, 1.0, 1.3]
-    
-    frame_count = 0
-    trackers = [] 
-    last_detected_boxes = []
-    last_action = "Unknown"
-    last_action_color = (0, 255, 0)
-    total_detections = 0
     
     while cap.isOpened():
         ret, frame = cap.read()
@@ -110,60 +100,10 @@ def process_video(input_path, output_path, classifier_type='ensemble', frame_ski
         if scale_factor != 1.0:
             frame = cv2.resize(frame, (new_width, new_height))
             
-        speed_est.estimate_speed(frame)
-
-        processed_frame = lane_det.detect_lanes(frame)
-        
-        if frame_count % frame_skip == 0:
-            processed_frame, num_dets, detections = detect_and_classify_frame(processed_frame, clf, classifier_type, cnn_threshold=0.50, scales=video_scales)
-            
-            trackers = []
-            for (x, y, w, h) in detections:
-                tracker = cv2.TrackerMIL_create()
-                
-                tracker.init(frame, (x, y, w, h))
-                trackers.append(tracker)
-
-            action, color = determine_driver_action(detections, new_width, new_height)
-            
-            cv2.putText(processed_frame, f"ACTION: {action}", (50, 50), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1.5, color, 3)
-            
-            if detections:
-                # Find largest detection (closest stop sign)
-                largest_det = max(detections, key=lambda b: b[2] * b[3])
-                speed_est.process_stop_sign(largest_det, frame_count)
-            
-            last_detected_boxes = detections
-            last_action = action
-            last_action_color = color
-            total_detections += num_dets
-        else:
-
-            updated_boxes = []
-            for tracker in trackers:
-                success, box = tracker.update(frame)
-                if success:
-                    x, y, w, h = [int(v) for v in box]
-                    updated_boxes.append((x, y, w, h))
-            
-            if not updated_boxes and last_detected_boxes:
-                 updated_boxes = last_detected_boxes
-
-            for (x, y, w, h) in updated_boxes:
-                cv2.rectangle(processed_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                cv2.putText(processed_frame, "Stop", (x, y - 10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.9, (36, 255, 12), 2)
-            
-            # Draw last known action
-            cv2.putText(processed_frame, f"ACTION: {last_action}", (50, 50), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1.5, last_action_color, 3)
-        
-        speed_est.draw_speed(processed_frame)
+        processed_frame, _, _ = processor.process_frame(frame, clf)
                 
         out.write(processed_frame)
         pbar.update(1)
-        frame_count += 1
         
     cap.release()
     out.release()
