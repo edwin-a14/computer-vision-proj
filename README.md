@@ -161,7 +161,7 @@ computer-vision-proj/
 │       ├── found_chips_cnn/           # CNN detections
 │       ├── found_chips_ensemble/      # Ensemble detections
 │       ├── evaluation_results.json    # Evaluation metrics
-│       ├── color_signatures.json      # Learned color composition (incl. black bin)
+│       ├── color_signatures.json      # Learned color composition
 │       └── classifier_comparison/     # Comparison visualizations
 │
 ├── computations/

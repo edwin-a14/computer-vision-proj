@@ -1,21 +1,16 @@
 import cv2
 import numpy as np
 import os
-import shutil
 import logging
 import argparse
 import json
-from scipy.signal import find_peaks
-from sklearn.cluster import DBSCAN
 from skimage.feature import hog
-from sklearn.svm import LinearSVC
-import pickle
 import joblib
-import matplotlib.colors as clr
-from typing import Optional, Union
+from typing import Optional
 from cnn_model import CNNClassifier
 import glob
 from color_shape_prep import extract_color_histogram, validate_histogram_against_signature
+from utils import draw_histogram_overlay, chip_path, remove_previous_outputs
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
@@ -207,7 +202,7 @@ def detect_multiscale(orig_img, scales=[0.3, 0.5, 0.7, 0.9, 1.0, 1.2, 1.5, 1.8])
     boxes = [bbox for bbox, _, _ in all_candidates]
     scores = [shape_score for _, shape_score, _ in all_candidates]
     
-    # Apply NMS across all scales with more lenient threshold
+    # Apply NMS across all scales with standard threshold
     keep_indices = non_max_suppression(boxes, scores, overlap_thresh=0.4)
     
     # Return kept detections (without scale info)
@@ -368,7 +363,7 @@ def extract_chip_with_padding(img, x, y, w, h, target_size=128, padding_ratio=0.
     return canvas
 
 def main(classifier_type: str = 'hog', cnn_model_path: Optional[str] = None, 
-         cnn_threshold: float = 0.5):
+         cnn_threshold: float = 0.5, debug_shape: bool = False, draw_hist: bool = False):
     
     logging.info(f"Starting traffic sign detection pipeline")
     logging.info(f"Classifier: {classifier_type.upper()}")
@@ -418,7 +413,8 @@ def main(classifier_type: str = 'hog', cnn_model_path: Optional[str] = None,
         
         # Load CNN
         if cnn_model_path is None:
-            cnn_model_path = os.path.join("computations", "cnn_stop_classifier.pth")
+            # Default to best CNN checkpoint in computations/cnn_checkpoints
+            cnn_model_path = os.path.join("computations", "cnn_checkpoints", "best_model.pth")
         
         if not os.path.exists(cnn_model_path):
             logging.error(f"CNN model not found at {cnn_model_path}")
@@ -440,7 +436,7 @@ def main(classifier_type: str = 'hog', cnn_model_path: Optional[str] = None,
     elif classifier_type.lower() == 'cnn':
         
         if cnn_model_path is None:
-            cnn_model_path = os.path.join("computations", "cnn_stop_classifier.pth")
+            cnn_model_path = os.path.join("computations", "cnn_checkpoints", "best_model.pth")
         
         if not os.path.exists(cnn_model_path):
             logging.error(f"CNN model not found at {cnn_model_path}")
@@ -481,8 +477,11 @@ def main(classifier_type: str = 'hog', cnn_model_path: Optional[str] = None,
             logging.info(f"Processing image {idx+1}/{total_images}: {road_sign_image}")
         
         try:
-            label_counts = process_single_image(road_sign_image, directory_path, results_path, clf, 
-                                                 classifier_type=classifier_type, cnn_threshold=cnn_threshold)
+            label_counts = process_single_image(
+                road_sign_image, directory_path, results_path, clf,
+                classifier_type=classifier_type, cnn_threshold=cnn_threshold,
+                debug_shape=debug_shape, draw_hist=draw_hist
+            )
             num_detections = label_counts['stop'] + label_counts['other']
             if num_detections > 0:
                 detection_stats['images_with_detections'] += 1
@@ -508,7 +507,7 @@ def main(classifier_type: str = 'hog', cnn_model_path: Optional[str] = None,
     
     return detection_stats
 
-def detect_and_classify_frame(orig_img, clf, classifier_type='hog', cnn_threshold=0.85, output_path=None, file_name=None, scales=None):
+def detect_and_classify_frame(orig_img, clf, classifier_type='hog', cnn_threshold=0.85, output_path=None, file_name=None, scales=None, debug_shape=False, draw_hist: bool = False):
     results = []
     bounding_boxes = []
     detection_scores = []
@@ -535,13 +534,36 @@ def detect_and_classify_frame(orig_img, clf, classifier_type='hog', cnn_threshol
         bounding_boxes = [bounding_boxes[i] for i in keep_indices]
         final_scores = [detection_scores[i] for i in keep_indices]
     
+    # Save candidate chips with shape score overlay; optionally add histogram data overlay
+    if debug_shape and output_path and file_name and len(bounding_boxes) > 0:
+        cand_dir = os.path.join(output_path, 'candidates')
+        os.makedirs(cand_dir, exist_ok=True)
+        for idx, (chip, score) in enumerate(zip(results, final_scores), start=1):
+            chip_annot = chip.copy()
+            try:
+                cv2.putText(chip_annot, f"shape:{score:.2f}", (4, 12), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+                if draw_hist:
+                    try:
+                        hist = extract_color_histogram(chip).astype(float)
+                        labels = ['R','Y','B','O','W','K']
+                        y_off = 24
+                        for lab, val in zip(labels, hist[:6]):
+                            cv2.putText(chip_annot, f"{lab}:{val:.2f}", (4, y_off), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255,255,255), 1)
+                            y_off += 12
+                    except Exception:
+                        pass
+                cv2.imwrite(os.path.join(cand_dir, f"cand_{idx}.png"), chip_annot)
+            except Exception:
+                pass
+    
     # Step 4: Classify and draw final detections
-    final_img, num_detections, detected_boxes, label_counts = test(results, bounding_boxes, final_scores, orig_img.copy(), clf, classifier_type, cnn_threshold, output_path, file_name)
+    final_img, num_detections, detected_boxes, label_counts = test(results, bounding_boxes, final_scores, orig_img.copy(), clf, classifier_type, cnn_threshold, output_path, file_name, draw_hist=draw_hist)
     
     return final_img, num_detections, detected_boxes, label_counts
 
 def process_single_image(road_sign_image, directory_path, results_path, clf, 
-                        classifier_type: str = 'hog', cnn_threshold: float = 0.85):
+                        classifier_type: str = 'hog', cnn_threshold: float = 0.85,
+                        debug_shape: bool = False, draw_hist: bool = False):
 
     path = os.path.join(directory_path, road_sign_image)
     orig_img = cv2.imread(path)
@@ -552,16 +574,19 @@ def process_single_image(road_sign_image, directory_path, results_path, clf,
     
     output_path = os.path.join(results_path, os.path.splitext(road_sign_image)[0])
     
-    # Clean up previous results
-    remove_previous_chips(output_path, 0, road_sign_image)
+    # Clean previous outputs (chips/candidates/validated) for this image
+    remove_previous_outputs(output_path, os.path.splitext(road_sign_image)[0], start_index=1)
     
-    final_img, num_detections, _, label_counts = detect_and_classify_frame(orig_img, clf, classifier_type, cnn_threshold, output_path, road_sign_image)
+    final_img, num_detections, _, label_counts = detect_and_classify_frame(
+        orig_img, clf, classifier_type, cnn_threshold, output_path, road_sign_image,
+        debug_shape=debug_shape, draw_hist=draw_hist
+    )
     cv2.imwrite(os.path.join(output_path, "result.png"), final_img)
     
     return label_counts
 
 
-def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, classifier_type: str = 'hog', cnn_threshold: float = 0.85, output_path=None, file_name=None):
+def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, classifier_type: str = 'hog', cnn_threshold: float = 0.85, output_path=None, file_name=None, draw_hist: bool = False):
     """
     Test detected chips using either HOG-SVM or CNN classifier, or ensemble.
     
@@ -671,21 +696,36 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
                     if is_stop:
                         # Verify with SIFT if required
                         if required_matches == 0 or verify_with_sift(results[idx], min_matches=required_matches):
-                            # After ensemble agreement, apply color signature gating to label STOP vs OTHER
-                            label = 'STOP'
-                            try:
-                                if _color_signatures and 'stop' in _color_signatures:
-                                    chip_hist = extract_color_histogram(results[idx]).astype(float)
-                                    all_within = validate_histogram_against_signature(
-                                        chip_hist,
-                                        _color_signatures['stop'],
-                                        primary_bins=6,
-                                        std_multiplier=1.5,
-                                        presence_epsilon=0.01,
-                                    )
-                                    label = 'STOP' if all_within else 'OTHER'
-                            except Exception:
+                            # If HOG says stop and CNN confidence is high, trust STOP without OTHER test
+                            if j < len(hog_predictions) and hog_predictions[j] == 'stop' and confidence >= 0.85:
                                 label = 'STOP'
+                            else:
+                                # Otherwise, apply color signature gating to decide STOP vs OTHER
+                                label = 'STOP'
+                                try:
+                                    if _color_signatures and 'stop' in _color_signatures:
+                                        chip_hist = extract_color_histogram(results[idx]).astype(float)
+                                        all_within = validate_histogram_against_signature(
+                                            chip_hist,
+                                            _color_signatures['stop'],
+                                            primary_bins=6,
+                                            std_multiplier=1.5,
+                                            presence_epsilon=0.01,
+                                            require_ratio=True,
+                                        )
+                                        label = 'STOP' if all_within else 'OTHER'
+                                except Exception:
+                                    label = 'STOP'
+
+                            # Save validated chip before labeling
+                            if output_path and file_name:
+                                try:
+                                    val_dir = os.path.join(output_path, 'validated')
+                                    os.makedirs(val_dir, exist_ok=True)
+                                    chip_tmp = results[idx].copy()
+                                    cv2.imwrite(os.path.join(val_dir, f"val_{len(os.listdir(val_dir))+1}.png"), chip_tmp)
+                                except Exception:
+                                    pass
 
                             # Record detection; count both STOP and OTHER
                             num_detections += 1
@@ -806,8 +846,9 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
         logging.debug(f"Decision scores range: [{decision_scores.min():.2f}, {decision_scores.max():.2f}]")
         
         for j, pred_idx in enumerate(valid_indices):
-            # Only consider candidates that the HOG-SVM predicted as 'stop'
-            if predictions[j] != 'stop':
+            # Evaluate all high-shape-score candidates even if HOG says 'bg'
+            # Keep HOG gate for lower-score boxes to control false positives
+            if predictions[j] != 'stop' and (scores[pred_idx] if pred_idx < len(scores) else 0) < 0.95:
                 continue
 
             x, y, w, h = bounding_boxes[pred_idx]
@@ -830,8 +871,13 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
                         primary_bins=6,
                         std_multiplier=1.5,
                         presence_epsilon=0.01,
+                        require_ratio=True,
                     )
-                    label = 'STOP' if all_within else 'OTHER'
+
+                    if all_within:
+                        label = 'STOP'
+                    else:
+                        label = 'OTHER'
                 except Exception as e:
                     logging.debug(f"Error checking color histogram: {e}")
                     label = 'STOP'  # Default to accepting if check fails
@@ -852,50 +898,16 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
             # Always draw the box/labels for visibility
             orig_img = cv2.rectangle(orig_img, (x, y), (x + w, y + h), color, 2)
             cv2.putText(orig_img, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
-            # Draw histogram values vertically on the right side with smaller font
-            if chip_hist is not None and len(chip_hist) >= 6:
-                r_val = chip_hist[0]
-                y_val = chip_hist[1]
-                b_val = chip_hist[2]
-                o_val = chip_hist[3]
-                w_val = chip_hist[4]
-                k_val = chip_hist[5]
-                font_scale = 0.35
-                thickness = 1
-                x_offset = x + w + 5
-                y_offset = y + 12
-                cv2.putText(orig_img, f"R:{r_val:.2f}", (x_offset, y_offset), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
-                y_offset += 12
-                cv2.putText(orig_img, f"Y:{y_val:.2f}", (x_offset, y_offset), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
-                y_offset += 12
-                cv2.putText(orig_img, f"B:{b_val:.2f}", (x_offset, y_offset), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
-                y_offset += 12
-                cv2.putText(orig_img, f"W:{w_val:.2f}", (x_offset, y_offset), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
-                y_offset += 12
-                cv2.putText(orig_img, f"K:{k_val:.2f}", (x_offset, y_offset), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
+            # Optionally draw histogram values vertically on the right side
+            if draw_hist and chip_hist is not None and len(chip_hist) >= 6:
+                draw_histogram_overlay(orig_img, chip_hist, x, y, w, color)
     except Exception as e:
         logging.error(f"Error during classification: {e}")
     
     return orig_img, num_detections, detected_boxes, label_counts
 
 
-def chip_path(directory: str, index: int, file_name: str, label: str = None):
-    parts = os.path.splitext(file_name)
-    label_suffix = f"_{label}" if label else ""
-    return os.path.join(directory, parts[0] + '_' + str(index) + label_suffix + parts[-1])
-
-def remove_previous_chips(directory: str, index: int, file_name: str):
-    while True:
-        path = chip_path(directory, index, file_name)
-        if os.path.exists(path):
-            try:
-                os.remove(path)
-            except Exception as e:
-                logging.warning(f"Could not remove {path}: {e}")
-            index+=1
-        else:
-            break
+    
 
 
 if __name__ == "__main__":
@@ -908,16 +920,99 @@ if __name__ == "__main__":
                         help='Path to CNN model checkpoint (.pth file) - required if using CNN or ensemble classifier')
     parser.add_argument('--threshold', type=float, default=0.5,
                         help='Confidence threshold for CNN predictions (default: 0.5)')
+    parser.add_argument('--debug-shape-candidates', action='store_true', help='Save candidate chips with shape scores overlay to candidates/ per image')
+    parser.add_argument('--draw-hist', action='store_true', help='Draw color histogram values (including Orange) on result images and candidate overlays')
+    parser.add_argument('--images', nargs='+', default=None,
+                        help='Process only the specified image file names (e.g., road55.png road112.png). If omitted, processes all images.')
     
     args = parser.parse_args()
-    
-    # Validate CNN arguments
-    if args.classifier in ['cnn', 'ensemble']:
-        if args.cnn_model is None:
-            print(f"Error: --cnn-model is required when using {args.classifier} classifier")
-            exit(1)
-        if not os.path.exists(args.cnn_model):
-            print(f"Error: CNN model file not found: {args.cnn_model}")
-            exit(1)
-    
-    main(classifier_type=args.classifier, cnn_model_path=args.cnn_model, cnn_threshold=args.threshold)
+
+    # If specific images are provided, run a focused pass without scanning the dataset
+    if args.images:
+        directory_path = "data/raw/kaggle_roadsign/images"
+        classifier_type = args.classifier
+        results_path = f"data/processed/found_chips_{classifier_type.lower()}"
+        os.makedirs(results_path, exist_ok=True)
+
+        color_sig_path = os.path.join('data', 'processed', 'color_signatures.json')
+        if os.path.exists(color_sig_path):
+            load_color_signatures(color_sig_path)
+
+        # Load classifier(s)
+        if classifier_type in ['cnn', 'ensemble']:
+            # Default to best checkpoint if not provided
+            if args.cnn_model is None:
+                args.cnn_model = os.path.join("computations", "cnn_checkpoints", "best_model.pth")
+            if not os.path.exists(args.cnn_model):
+                print(f"Error: CNN model not found at {args.cnn_model}")
+                exit(1)
+        clf = None
+        if classifier_type == 'ensemble':
+            hog_path = os.path.join("computations", "hog_svm_stop_and_bg.pkl")
+            hog_clf = joblib.load(hog_path)
+            cnn_clf = CNNClassifier(model_path=args.cnn_model, input_size=224)
+            cnn_clf.threshold = args.threshold
+            clf = (hog_clf, cnn_clf)
+            init_sift_verifier()
+        elif classifier_type == 'cnn':
+            clf = CNNClassifier(model_path=args.cnn_model, input_size=224)
+            clf.threshold = args.threshold
+            init_sift_verifier()
+        else:
+            computations_path = os.path.join("computations", "hog_svm_stop_and_bg.pkl")
+            clf = joblib.load(computations_path)
+
+        # Process only provided images
+        detection_stats = {
+            'total_images': len(args.images),
+            'images_with_detections': 0,
+            'total_detections': 0,
+            'images_processed': []
+        }
+        for img_name in args.images:
+            try:
+                label_counts = process_single_image(
+                    img_name, directory_path, results_path, clf,
+                    classifier_type=classifier_type, cnn_threshold=args.threshold,
+                    debug_shape=args.debug_shape_candidates, draw_hist=args.draw_hist
+                )
+                num_detections = label_counts['stop'] + label_counts['other']
+                if num_detections > 0:
+                    detection_stats['images_with_detections'] += 1
+                    detection_stats['total_detections'] += num_detections
+                detection_stats['images_processed'].append({
+                    'name': img_name,
+                    'detections': num_detections,
+                    'detections_by_label': label_counts
+                })
+            except Exception as e:
+                logging.warning(f"Error processing {img_name}: {e}")
+                continue
+        stats_file = os.path.join(results_path, f'detection_stats_{classifier_type}.json')
+        with open(stats_file, 'w') as f:
+            json.dump(detection_stats, f, indent=2)
+        logging.info("Detection pipeline complete (selected images)!")
+        logging.info(f"Total detections: {detection_stats['total_detections']}")
+        logging.info(f"Images with detections: {detection_stats['images_with_detections']}/{len(args.images)}")
+        logging.info(f"Statistics saved to: {stats_file}")
+    else:
+        # Route to main based on classifier type
+        if args.classifier in ['cnn', 'ensemble']:
+            if args.cnn_model is None or not os.path.exists(args.cnn_model):
+                print(f"Error: --cnn-model is required and must exist when using {args.classifier} classifier")
+                exit(1)
+            main(
+                classifier_type=args.classifier,
+                cnn_model_path=args.cnn_model,
+                cnn_threshold=args.threshold,
+                debug_shape=args.debug_shape_candidates,
+                draw_hist=args.draw_hist,
+            )
+        else:
+            main(
+                classifier_type='hog',
+                cnn_model_path=None,
+                cnn_threshold=args.threshold,
+                debug_shape=args.debug_shape_candidates,
+                draw_hist=args.draw_hist,
+            )

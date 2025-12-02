@@ -2,6 +2,7 @@ import os
 import json
 import csv
 import logging
+import shutil
 from pathlib import Path
 from typing import Dict, List, Tuple
 import argparse
@@ -95,7 +96,8 @@ def count_detections_in_image(results_dir: str, img_name: str) -> int:
 
 def evaluate_detections(positive_gt: Dict[str, List], 
                        other_gt: Dict[str, List],
-                       stats_path: str) -> Dict:
+                       stats_path: str,
+                       results_dir: str = None) -> Dict:
     with open(stats_path, 'r') as f:
         stats = json.load(f)
     
@@ -104,18 +106,30 @@ def evaluate_detections(positive_gt: Dict[str, List],
     false_negatives = 0
     true_negatives_other = 0  # 'other' detections matching non-stop GT
     
-    images_with_gt = set(positive_gt.keys())
-    total_gt_signs = sum(len(boxes) for boxes in positive_gt.values())
+    # Scope GT to only evaluated images to avoid mismatched totals
+    all_images = set(item['name'] for item in stats['images_processed'])
+    scoped_positive_gt = {img: boxes for img, boxes in positive_gt.items() if img in all_images}
+    scoped_other_gt = {img: boxes for img, boxes in other_gt.items() if img in all_images}
+    images_with_gt = set(scoped_positive_gt.keys())
+    total_gt_signs = sum(len(boxes) for boxes in scoped_positive_gt.values())
     
     image_results = []
     
-    all_images = set()
-    for item in stats['images_processed']:
-        all_images.add(item['name'])
+    # Create directories for TP/FP/FN if results_dir provided
+    if results_dir:
+        tp_dir = os.path.join(results_dir, 'true_positives')
+        fp_dir = os.path.join(results_dir, 'false_positives')
+        fn_dir = os.path.join(results_dir, 'false_negatives')
+        
+        # Clear existing directories
+        for dir_path in [tp_dir, fp_dir, fn_dir]:
+            if os.path.exists(dir_path):
+                shutil.rmtree(dir_path)
+            os.makedirs(dir_path, exist_ok=True)
     
     for img_name in all_images:
-        gt_boxes = positive_gt.get(img_name, [])
-        other_boxes = other_gt.get(img_name, [])
+        gt_boxes = scoped_positive_gt.get(img_name, [])
+        other_boxes = scoped_other_gt.get(img_name, [])
         
         # Count detections by label
         num_stop_detections = 0
@@ -136,17 +150,47 @@ def evaluate_detections(positive_gt: Dict[str, List],
         has_gt_stop = len(gt_boxes) > 0
         has_stop_detection = num_stop_detections > 0
         
+        # Get chip paths for this image
+        img_base = os.path.splitext(img_name)[0]
+        img_dir = os.path.join(results_dir, img_base) if results_dir else None
+        
         if has_gt_stop and has_stop_detection:
-            # Conservative: assume detections match GT
-            true_positives += min(num_stop_detections, len(gt_boxes))
+            # True positives
+            tp_count = min(num_stop_detections, len(gt_boxes))
+            true_positives += tp_count
+            
+            # Copy result.png to TP directory
+            if img_dir and os.path.exists(img_dir):
+                result_img = os.path.join(img_dir, 'result.png')
+                if os.path.exists(result_img):
+                    dst = os.path.join(tp_dir, f'{img_base}_result.png')
+                    shutil.copy2(result_img, dst)
+            
+            # False positives (extra detections)
             if num_stop_detections > len(gt_boxes):
                 false_positives += (num_stop_detections - len(gt_boxes))
+                
         elif has_gt_stop and not has_stop_detection:
-            # Missed all GT stop signs
+            # False negatives - missed all GT stop signs
             false_negatives += len(gt_boxes)
+            
+            # Copy result.png to FN directory
+            if img_dir and os.path.exists(img_dir):
+                result_img = os.path.join(img_dir, 'result.png')
+                if os.path.exists(result_img):
+                    dst = os.path.join(fn_dir, f'{img_base}_result.png')
+                    shutil.copy2(result_img, dst)
+                    
         elif not has_gt_stop and has_stop_detection:
-            # Stop detections where there are no GT stop signs
+            # False positives - detections where there are no GT stop signs
             false_positives += num_stop_detections
+            
+            # Copy result.png to FP directory
+            if img_dir and os.path.exists(img_dir):
+                result_img = os.path.join(img_dir, 'result.png')
+                if os.path.exists(result_img):
+                    dst = os.path.join(fp_dir, f'{img_base}_result.png')
+                    shutil.copy2(result_img, dst)
         
         # Evaluate 'other' detections
         has_gt_other = len(other_boxes) > 0
@@ -182,7 +226,7 @@ def evaluate_detections(positive_gt: Dict[str, List],
         'images_with_gt_stop_signs': len(images_with_gt),
         'images_without_gt_stop_signs': images_without_gt,
         'total_gt_stop_signs': total_gt_signs,
-        'total_gt_other_signs': sum(len(boxes) for boxes in other_gt.values()),
+        'total_gt_other_signs': sum(len(boxes) for boxes in scoped_other_gt.values()),
         'total_detections': stats['total_detections'],
         'true_positives': true_positives,
         'false_positives': false_positives,
@@ -228,29 +272,29 @@ def main():
     # Evaluate HOG-SVM
     hog_stats_path = os.path.join(args.hog_dir, 'detection_stats_hog.json')
     if os.path.exists(hog_stats_path):
-        logging.info("\nEvaluating HOG-SVM detections...")
-        results['hog_svm'] = evaluate_detections(positive_gt, other_gt, hog_stats_path)
+        logging.info("Evaluating HOG-SVM detections...")
+        results['hog_svm'] = evaluate_detections(positive_gt, other_gt, hog_stats_path, args.hog_dir)
     else:
         logging.warning(f"HOG-SVM stats not found at {hog_stats_path}")
     
     # Evaluate CNN
     cnn_stats_path = os.path.join(args.cnn_dir, 'detection_stats_cnn.json')
     if os.path.exists(cnn_stats_path):
-        logging.info("\nEvaluating CNN detections...")
-        results['cnn'] = evaluate_detections(positive_gt, other_gt, cnn_stats_path)
+        logging.info("Evaluating CNN detections...")
+        results['cnn'] = evaluate_detections(positive_gt, other_gt, cnn_stats_path, args.cnn_dir)
     else:
         logging.warning(f"CNN stats not found at {cnn_stats_path}")
     
     # Evaluate Ensemble
     ensemble_stats_path = os.path.join(args.ensemble_dir, 'detection_stats_ensemble.json')
     if os.path.exists(ensemble_stats_path):
-        logging.info("\nEvaluating Ensemble detections...")
-        results['ensemble'] = evaluate_detections(positive_gt, other_gt, ensemble_stats_path)
+        logging.info("Evaluating Ensemble detections...")
+        results['ensemble'] = evaluate_detections(positive_gt, other_gt, ensemble_stats_path, args.ensemble_dir)
     else:
         logging.info(f"Ensemble stats not found (optional) at {ensemble_stats_path}")
     
     # Print results
-    logging.info("\n" + "="*70)
+    logging.info("="*70)
     logging.info("DETECTION EVALUATION RESULTS")
     logging.info("="*70)
     
@@ -282,7 +326,7 @@ def main():
     with open(output_path, 'w') as f:
         json.dump(results, f, indent=2)
     
-    logging.info(f"\nResults saved to: {output_path}")
+    logging.info(f"Results saved to: {output_path}")
 
 
 if __name__ == '__main__':

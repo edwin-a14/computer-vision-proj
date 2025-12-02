@@ -292,7 +292,7 @@ def main():
     generate_statistical_comparison(hog_stats, cnn_stats, args.output_dir)
     
     if not args.skip_images:
-        logging.info(f"\nGenerating side-by-side comparisons (max {args.max_comparisons})...")
+        logging.info(f"Generating side-by-side comparisons (max {args.max_comparisons})...")
         
         # Create detection lookup for prioritization
         hog_detections_dict = {img['name']: img['detections'] for img in hog_stats['images_processed']}
@@ -342,11 +342,11 @@ def main():
             if create_side_by_side_comparison(image_name, args.hog_dir, args.cnn_dir, args.output_dir):
                 successful += 1
         
-        logging.info(f"\nGenerated {successful} side-by-side comparisons")
+        logging.info(f"Generated {successful} side-by-side comparisons")
         logging.info(f"  Images with at least one detection: {len(images_with_detections)}")
         logging.info(f"  Images with no detections: {len(images_without_detections)}")
     
-    logging.info(f"\nComparison complete! Results saved to: {args.output_dir}")
+    logging.info(f"Comparison complete! Results saved to: {args.output_dir}")
 
 
 if __name__ == '__main__':

@@ -56,7 +56,12 @@ def validate_histogram_against_signature(
                 if abs(chip_hist[i] - mean_val) > multiplier * std_val:
                     return False
             elif mean_val - std_val > 0:
-                if abs(chip_hist[i] - mean_val) > std_multiplier * std_val:
+                # For significant bins, use asymmetric bounds: stricter lower, relaxed upper
+                lower_multiplier = 1.0  # Stricter lower bound
+                upper_multiplier = std_multiplier  # Normal upper bound
+                if chip_hist[i] < mean_val - lower_multiplier * std_val:
+                    return False
+                if chip_hist[i] > mean_val + upper_multiplier * std_val:
                     return False
             else:
                 if chip_hist[i] > mean_val + std_val:
@@ -83,8 +88,15 @@ def validate_histogram_against_signature(
                                 continue
                             ratio_evaluated = True
                             chip_log_ratio = np.log(chip_hist[i] + 1e-10) - np.log(chip_hist[j] + 1e-10)
-                            if abs(chip_log_ratio - exp_mu) > exp_sigma:
-                                return False
+                            
+                            # Only check positive ratios (i > j), relax upper bound by 2x
+                            if exp_mu > 0:
+                                # Check if chip ratio is too low (stricter lower bound)
+                                if chip_log_ratio < exp_mu - exp_sigma:
+                                    return False
+                                # Relax upper bound: allow up to 2x the std deviation above mean
+                                if chip_log_ratio > exp_mu + 2.0 * exp_sigma:
+                                    return False
         # If ratio checks are required but none were evaluated, reject
         if require_ratio and not ratio_evaluated:
             return False
