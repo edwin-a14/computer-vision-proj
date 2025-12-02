@@ -9,16 +9,26 @@ import argparse
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 
-def load_ground_truth(csv_path: str) -> Dict[str, List[Tuple[int, int, int, int]]]:
-    # Load ground truth annotations from CSV.
-    ground_truth = {}
-    
+def load_ground_truth(csv_path: str, positive_labels: Tuple[str, ...] = ("stop",)) -> Tuple[Dict[str, List[Tuple[int, int, int, int]]], Dict[str, List[Tuple[int, int, int, int]]]]:
+    """Load ground truth annotations from CSV, separating positive and other labels.
+
+    Returns:
+        positive_gt: Dict mapping image_name -> list of bboxes for positive labels (e.g., stop)
+        other_gt: Dict mapping image_name -> list of bboxes for other (non-bg) labels
+    """
+    positive_gt = {}
+    other_gt = {}
+
     with open(csv_path, 'r') as f:
         reader = csv.DictReader(f)
         for row in reader:
+            label = (row.get('label') or '').strip().lower()
+            if label == 'bg' or not label:
+                continue
+
             img_path = row['img_path']
             img_name = os.path.basename(img_path)
-            
+
             # Parse bounding box
             bbox = (
                 int(row['xmin']),
@@ -26,12 +36,18 @@ def load_ground_truth(csv_path: str) -> Dict[str, List[Tuple[int, int, int, int]
                 int(row['xmax']),
                 int(row['ymax'])
             )
-            
-            if img_name not in ground_truth:
-                ground_truth[img_name] = []
-            ground_truth[img_name].append(bbox)
-    
-    return ground_truth
+
+            if label in positive_labels:
+                if img_name not in positive_gt:
+                    positive_gt[img_name] = []
+                positive_gt[img_name].append(bbox)
+            else:
+                # Non-positive, non-bg label (e.g., other signs)
+                if img_name not in other_gt:
+                    other_gt[img_name] = []
+                other_gt[img_name].append(bbox)
+
+    return positive_gt, other_gt
 
 
 def calculate_iou(box1: Tuple[int, int, int, int], 
@@ -77,7 +93,8 @@ def count_detections_in_image(results_dir: str, img_name: str) -> int:
     return count
 
 
-def evaluate_detections(ground_truth: Dict[str, List], 
+def evaluate_detections(positive_gt: Dict[str, List], 
+                       other_gt: Dict[str, List],
                        stats_path: str) -> Dict:
     with open(stats_path, 'r') as f:
         stats = json.load(f)
@@ -85,9 +102,10 @@ def evaluate_detections(ground_truth: Dict[str, List],
     true_positives = 0
     false_positives = 0
     false_negatives = 0
+    true_negatives_other = 0  # 'other' detections matching non-stop GT
     
-    images_with_gt = set(ground_truth.keys())
-    total_gt_signs = sum(len(boxes) for boxes in ground_truth.values())
+    images_with_gt = set(positive_gt.keys())
+    total_gt_signs = sum(len(boxes) for boxes in positive_gt.values())
     
     image_results = []
     
@@ -96,44 +114,57 @@ def evaluate_detections(ground_truth: Dict[str, List],
         all_images.add(item['name'])
     
     for img_name in all_images:
-        gt_boxes = ground_truth.get(img_name, [])
-        num_detections = 0
+        gt_boxes = positive_gt.get(img_name, [])
+        other_boxes = other_gt.get(img_name, [])
         
-        # Count detections from saved chips
+        # Count detections by label
+        num_stop_detections = 0
+        num_other_detections = 0
+        
         for item in stats['images_processed']:
             if item['name'] == img_name:
-                num_detections = item['detections']
+                # Check if stats include label breakdown
+                if 'detections_by_label' in item:
+                    num_stop_detections = item['detections_by_label'].get('stop', 0)
+                    num_other_detections = item['detections_by_label'].get('other', 0)
+                else:
+                    # Fallback: assume all detections are 'stop'
+                    num_stop_detections = item['detections']
                 break
         
-        # For now, use a simple heuristic:
-        # - If image has GT stop signs and we detected something: potential TP
-        # - If image has GT stop signs and we detected nothing: FN
-        # - If image has no GT stop signs and we detected something: FP
-        # - If image has no GT stop signs and we detected nothing: TN
+        # Evaluate stop sign detections
+        has_gt_stop = len(gt_boxes) > 0
+        has_stop_detection = num_stop_detections > 0
         
-        has_gt = len(gt_boxes) > 0
-        has_detection = num_detections > 0
-        
-        if has_gt and has_detection:
-            # Assume detections are correct for images with GT
-            # (Conservative estimate - actual TP might be lower)
-            true_positives += min(num_detections, len(gt_boxes))
-            if num_detections > len(gt_boxes):
-                false_positives += (num_detections - len(gt_boxes))
-        elif has_gt and not has_detection:
-            # Missed all GT signs
+        if has_gt_stop and has_stop_detection:
+            # Conservative: assume detections match GT
+            true_positives += min(num_stop_detections, len(gt_boxes))
+            if num_stop_detections > len(gt_boxes):
+                false_positives += (num_stop_detections - len(gt_boxes))
+        elif has_gt_stop and not has_stop_detection:
+            # Missed all GT stop signs
             false_negatives += len(gt_boxes)
-        elif not has_gt and has_detection:
-            # All detections are false positives
-            false_positives += num_detections
-        # else: TN (no GT, no detection) - not counted
+        elif not has_gt_stop and has_stop_detection:
+            # Stop detections where there are no GT stop signs
+            false_positives += num_stop_detections
+        
+        # Evaluate 'other' detections
+        has_gt_other = len(other_boxes) > 0
+        if has_gt_other and num_other_detections > 0:
+            # 'other' detections matching non-stop GT signs = true negatives (correct rejection of non-stop)
+            true_negatives_other += min(num_other_detections, len(other_boxes))
+        elif not has_gt_other and num_other_detections > 0:
+            # 'other' detections where there are no other signs = acceptable (rejected as non-stop)
+            pass  # Not counted as FP
         
         image_results.append({
             'image': img_name,
-            'gt_count': len(gt_boxes),
-            'detected_count': num_detections,
-            'has_gt': has_gt,
-            'has_detection': has_detection
+            'gt_stop_count': len(gt_boxes),
+            'gt_other_count': len(other_boxes),
+            'detected_stop': num_stop_detections,
+            'detected_other': num_other_detections,
+            'has_gt_stop': has_gt_stop,
+            'has_stop_detection': has_stop_detection
         })
     
     precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
@@ -144,20 +175,24 @@ def evaluate_detections(ground_truth: Dict[str, List],
     images_without_gt = len(all_images) - len(images_with_gt)
     fpr = false_positives / stats['total_detections'] if stats['total_detections'] > 0 else 0
     
+    images_without_gt = len(all_images) - len(images_with_gt)
+    
     results = {
         'total_images': len(all_images),
-        'images_with_gt_signs': len(images_with_gt),
-        'images_without_gt_signs': images_without_gt,
-        'total_gt_signs': total_gt_signs,
+        'images_with_gt_stop_signs': len(images_with_gt),
+        'images_without_gt_stop_signs': images_without_gt,
+        'total_gt_stop_signs': total_gt_signs,
+        'total_gt_other_signs': sum(len(boxes) for boxes in other_gt.values()),
         'total_detections': stats['total_detections'],
         'true_positives': true_positives,
         'false_positives': false_positives,
         'false_negatives': false_negatives,
+        'true_negatives_other': true_negatives_other,
         'precision': precision,
         'recall': recall,
         'f1_score': f1_score,
         'false_positive_rate': fpr,
-        'images_with_false_positives': len([r for r in image_results if not r['has_gt'] and r['has_detection']]),
+        'images_with_false_positives': len([r for r in image_results if not r['has_gt_stop'] and r['detected_stop'] > 0]),
         'avg_detections_per_image': stats['total_detections'] / len(all_images),
     }
     
@@ -181,9 +216,12 @@ def main():
     parser.add_argument('--output', type=str,
                        default='data/processed/evaluation_results.json',
                        help='Output path for evaluation results')
+    parser.add_argument('--positive-labels', type=str, default='stop',
+                        help='Comma-separated list of labels considered positives (default: stop). Others are treated as negatives.')
     
-    args = parser.parse_args()    
-    ground_truth = load_ground_truth(args.annotations)
+    args = parser.parse_args()
+    positive_labels = tuple([s.strip().lower() for s in args.positive_labels.split(',') if s.strip()]) or ("stop",)
+    positive_gt, other_gt = load_ground_truth(args.annotations, positive_labels=positive_labels)
 
     results = {}
     
@@ -191,7 +229,7 @@ def main():
     hog_stats_path = os.path.join(args.hog_dir, 'detection_stats_hog.json')
     if os.path.exists(hog_stats_path):
         logging.info("\nEvaluating HOG-SVM detections...")
-        results['hog_svm'] = evaluate_detections(ground_truth, hog_stats_path)
+        results['hog_svm'] = evaluate_detections(positive_gt, other_gt, hog_stats_path)
     else:
         logging.warning(f"HOG-SVM stats not found at {hog_stats_path}")
     
@@ -199,7 +237,7 @@ def main():
     cnn_stats_path = os.path.join(args.cnn_dir, 'detection_stats_cnn.json')
     if os.path.exists(cnn_stats_path):
         logging.info("\nEvaluating CNN detections...")
-        results['cnn'] = evaluate_detections(ground_truth, cnn_stats_path)
+        results['cnn'] = evaluate_detections(positive_gt, other_gt, cnn_stats_path)
     else:
         logging.warning(f"CNN stats not found at {cnn_stats_path}")
     
@@ -207,7 +245,7 @@ def main():
     ensemble_stats_path = os.path.join(args.ensemble_dir, 'detection_stats_ensemble.json')
     if os.path.exists(ensemble_stats_path):
         logging.info("\nEvaluating Ensemble detections...")
-        results['ensemble'] = evaluate_detections(ground_truth, ensemble_stats_path)
+        results['ensemble'] = evaluate_detections(positive_gt, other_gt, ensemble_stats_path)
     else:
         logging.info(f"Ensemble stats not found (optional) at {ensemble_stats_path}")
     
@@ -220,14 +258,16 @@ def main():
         logging.info(f"\n{classifier_name.upper()}:")
         logging.info(f"  Dataset Statistics:")
         logging.info(f"    Total images: {metrics['total_images']}")
-        logging.info(f"    Images with GT stop signs: {metrics['images_with_gt_signs']}")
-        logging.info(f"    Images without GT stop signs: {metrics['images_without_gt_signs']}")
-        logging.info(f"    Total GT stop signs: {metrics['total_gt_signs']}")
+        logging.info(f"    Images with GT stop signs: {metrics['images_with_gt_stop_signs']}")
+        logging.info(f"    Images without GT stop signs: {metrics['images_without_gt_stop_signs']}")
+        logging.info(f"    Total GT stop signs: {metrics['total_gt_stop_signs']}")
+        logging.info(f"    Total GT other signs: {metrics['total_gt_other_signs']}")
         logging.info(f"  Detection Statistics:")
         logging.info(f"    Total detections: {metrics['total_detections']}")
         logging.info(f"    True Positives (TP): {metrics['true_positives']}")
         logging.info(f"    False Positives (FP): {metrics['false_positives']}")
         logging.info(f"    False Negatives (FN): {metrics['false_negatives']}")
+        logging.info(f"    True Negatives - Other matched: {metrics['true_negatives_other']}")
         logging.info(f"    Images with false positives: {metrics['images_with_false_positives']}")
         logging.info(f"  Performance Metrics:")
         logging.info(f"    Precision: {metrics['precision']:.3f} ({metrics['precision']*100:.1f}%)")

@@ -15,8 +15,12 @@ import matplotlib.colors as clr
 from typing import Optional, Union
 from cnn_model import CNNClassifier
 import glob
+from color_shape_prep import extract_color_histogram, validate_histogram_against_signature
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+# Global color signatures (for histogram checks)
+_color_signatures = None
 
 _sift = None
 _sift_ref_descriptors = [] # List of descriptors for multiple reference images
@@ -80,6 +84,20 @@ def verify_with_sift(chip_img, min_matches=2):
         return False
     except Exception as e:
         return False
+
+
+def load_color_signatures(json_path):
+    """Load color signatures JSON into global cache."""
+    global _color_signatures
+    try:
+        with open(json_path, 'r') as f:
+            _color_signatures = json.load(f)
+        logging.info(f"Loaded color signatures from {json_path}")
+        return _color_signatures
+    except Exception as e:
+        logging.warning(f"Could not load color signatures: {e}")
+        _color_signatures = None
+        return None
 
 def non_max_suppression(boxes, scores, overlap_thresh=0.3):
     if len(boxes) == 0:
@@ -364,6 +382,13 @@ def main(classifier_type: str = 'hog', cnn_model_path: Optional[str] = None,
     os.makedirs(results_path, exist_ok=True)
     logging.info(f"Output directory: {results_path}")
 
+    # Try to load color signatures for histogram-based checks
+    color_sig_path = os.path.join('data', 'processed', 'color_signatures.json')
+    if os.path.exists(color_sig_path):
+        load_color_signatures(color_sig_path)
+    else:
+        logging.warning(f"Color signatures not found at {color_sig_path}; histogram checks disabled")
+
     images = []
     try:
         entries = os.listdir(directory_path)
@@ -456,14 +481,16 @@ def main(classifier_type: str = 'hog', cnn_model_path: Optional[str] = None,
             logging.info(f"Processing image {idx+1}/{total_images}: {road_sign_image}")
         
         try:
-            num_detections = process_single_image(road_sign_image, directory_path, results_path, clf, 
+            label_counts = process_single_image(road_sign_image, directory_path, results_path, clf, 
                                                  classifier_type=classifier_type, cnn_threshold=cnn_threshold)
+            num_detections = label_counts['stop'] + label_counts['other']
             if num_detections > 0:
                 detection_stats['images_with_detections'] += 1
                 detection_stats['total_detections'] += num_detections
             detection_stats['images_processed'].append({
                 'name': road_sign_image,
-                'detections': num_detections
+                'detections': num_detections,
+                'detections_by_label': label_counts
             })
         except Exception as e:
             logging.warning(f"Error processing {road_sign_image}: {e}")
@@ -509,9 +536,9 @@ def detect_and_classify_frame(orig_img, clf, classifier_type='hog', cnn_threshol
         final_scores = [detection_scores[i] for i in keep_indices]
     
     # Step 4: Classify and draw final detections
-    final_img, num_detections, detected_boxes = test(results, bounding_boxes, final_scores, orig_img.copy(), clf, classifier_type, cnn_threshold, output_path, file_name)
+    final_img, num_detections, detected_boxes, label_counts = test(results, bounding_boxes, final_scores, orig_img.copy(), clf, classifier_type, cnn_threshold, output_path, file_name)
     
-    return final_img, num_detections, detected_boxes
+    return final_img, num_detections, detected_boxes, label_counts
 
 def process_single_image(road_sign_image, directory_path, results_path, clf, 
                         classifier_type: str = 'hog', cnn_threshold: float = 0.85):
@@ -521,17 +548,17 @@ def process_single_image(road_sign_image, directory_path, results_path, clf,
     
     if orig_img is None:
         logging.warning(f"Failed to read image: {road_sign_image}")
-        return 0
+        return {'stop': 0, 'other': 0}
     
     output_path = os.path.join(results_path, os.path.splitext(road_sign_image)[0])
     
     # Clean up previous results
     remove_previous_chips(output_path, 0, road_sign_image)
     
-    final_img, num_detections, _ = detect_and_classify_frame(orig_img, clf, classifier_type, cnn_threshold, output_path, road_sign_image)
+    final_img, num_detections, _, label_counts = detect_and_classify_frame(orig_img, clf, classifier_type, cnn_threshold, output_path, road_sign_image)
     cv2.imwrite(os.path.join(output_path, "result.png"), final_img)
     
-    return num_detections
+    return label_counts
 
 
 def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, classifier_type: str = 'hog', cnn_threshold: float = 0.85, output_path=None, file_name=None):
@@ -553,10 +580,12 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
         orig_img: Annotated image
         num_detections: Number of detections
         detected_boxes: List of detected bounding boxes [(x, y, w, h), ...]
+        label_counts: Dict with counts by label {'stop': n, 'other': m}
     """
     detected_boxes = []
+    label_counts = {'stop': 0, 'other': 0}
     if len(results) == 0:
-        return orig_img, 0, []
+        return orig_img, 0, [], label_counts
     
     num_detections = 0
     
@@ -642,21 +671,41 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
                     if is_stop:
                         # Verify with SIFT if required
                         if required_matches == 0 or verify_with_sift(results[idx], min_matches=required_matches):
+                            # After ensemble agreement, apply color signature gating to label STOP vs OTHER
+                            label = 'STOP'
+                            try:
+                                if _color_signatures and 'stop' in _color_signatures:
+                                    chip_hist = extract_color_histogram(results[idx]).astype(float)
+                                    all_within = validate_histogram_against_signature(
+                                        chip_hist,
+                                        _color_signatures['stop'],
+                                        primary_bins=6,
+                                        std_multiplier=1.5,
+                                        presence_epsilon=0.01,
+                                    )
+                                    label = 'STOP' if all_within else 'OTHER'
+                            except Exception:
+                                label = 'STOP'
+
+                            # Record detection; count both STOP and OTHER
                             num_detections += 1
+                            label_key = 'stop' if label == 'STOP' else 'other'
+                            label_counts[label_key] += 1
                             x, y, w, h = bounding_boxes[idx]
                             detected_boxes.append((x, y, w, h))
-                            orig_img = cv2.rectangle(orig_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                            label = f'ENS {confidence:.2f}'
-                            cv2.putText(orig_img, label, (x, y - 10), 
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                            color = (0, 255, 0) if label == 'STOP' else (0, 165, 255)
+                            orig_img = cv2.rectangle(orig_img, (x, y), (x + w, y + h), color, 2)
+                            display_text = f"ENS {confidence:.2f} {label}"
+                            cv2.putText(orig_img, display_text, (x, y - 10), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                             
                             if output_path and file_name:
-                                chip_path_str = chip_path(output_path, num_detections, file_name)
+                                chip_path_str = chip_path(output_path, num_detections, file_name, label=label)
                                 cv2.imwrite(chip_path_str, results[idx])
         except Exception as e:
             logging.error(f"Error during ensemble classification: {e}")
         
-        return orig_img, num_detections, detected_boxes
+        return orig_img, num_detections, detected_boxes, label_counts
     
     # Use CNN classifier
     if classifier_type.lower() == 'cnn':
@@ -679,6 +728,7 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
             for i, (pred, conf) in enumerate(zip(predictions, confidences)):
                 if pred == 'stop' and conf >= confidence_threshold:
                     num_detections += 1
+                    label_counts['stop'] += 1
                     x, y, w, h = bounding_boxes[i]
                     detected_boxes.append((x, y, w, h))
                     orig_img = cv2.rectangle(orig_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
@@ -693,7 +743,7 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
         except Exception as e:
             logging.error(f"Error during CNN classification: {e}")
         
-        return orig_img, num_detections, detected_boxes
+        return orig_img, num_detections, detected_boxes, label_counts
     
     # Use HOG-SVM classifier
     features = []
@@ -741,7 +791,7 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
             continue
     
     if len(features) == 0:
-        return orig_img, num_detections
+        return orig_img, num_detections, detected_boxes, label_counts
     
     try:
         features_array = np.array(features)
@@ -756,28 +806,84 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
         logging.debug(f"Decision scores range: [{decision_scores.min():.2f}, {decision_scores.max():.2f}]")
         
         for j, pred_idx in enumerate(valid_indices):
-            if predictions[j] == 'stop':
-                num_detections += 1
-                x, y, w, h = bounding_boxes[pred_idx]
-                detected_boxes.append((x, y, w, h))
-                # Draw green rectangle for stop sign detections
-                orig_img = cv2.rectangle(orig_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                # Add label
-                cv2.putText(orig_img, 'STOP', (x, y - 10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                
-                if output_path and file_name:
-                    chip_path_str = chip_path(output_path, num_detections, file_name)
-                    cv2.imwrite(chip_path_str, results[pred_idx])
+            # Only consider candidates that the HOG-SVM predicted as 'stop'
+            if predictions[j] != 'stop':
+                continue
+
+            x, y, w, h = bounding_boxes[pred_idx]
+
+            # Extract chip histogram using centralized function
+            try:
+                chip_hist = extract_color_histogram(results[pred_idx]).astype(float)
+            except Exception:
+                chip_hist = None
+
+            # Default: assume not matching
+            label = None
+
+            # If we have color signatures for 'stop', check all color bins
+            if _color_signatures and 'stop' in _color_signatures and chip_hist is not None:
+                try:
+                    all_within = validate_histogram_against_signature(
+                        chip_hist,
+                        _color_signatures['stop'],
+                        primary_bins=6,
+                        std_multiplier=1.5,
+                        presence_epsilon=0.01,
+                    )
+                    label = 'STOP' if all_within else 'OTHER'
+                except Exception as e:
+                    logging.debug(f"Error checking color histogram: {e}")
+                    label = 'STOP'  # Default to accepting if check fails
+            else:
+                # No signatures available or histogram failed: accept HOG-SVM prediction
+                label = 'STOP'
+
+            # Record and draw: count both STOP and OTHER as detections; label distinguishes type
+            color = (0, 255, 0) if label == 'STOP' else (0, 165, 255)
+            num_detections += 1
+            label_key = 'stop' if label == 'STOP' else 'other'
+            label_counts[label_key] += 1
+            detected_boxes.append((x, y, w, h))
+            if output_path and file_name:
+                chip_path_str = chip_path(output_path, num_detections, file_name, label=label)
+                cv2.imwrite(chip_path_str, results[pred_idx])
+
+            # Always draw the box/labels for visibility
+            orig_img = cv2.rectangle(orig_img, (x, y), (x + w, y + h), color, 2)
+            cv2.putText(orig_img, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+            # Draw histogram values vertically on the right side with smaller font
+            if chip_hist is not None and len(chip_hist) >= 6:
+                r_val = chip_hist[0]
+                y_val = chip_hist[1]
+                b_val = chip_hist[2]
+                o_val = chip_hist[3]
+                w_val = chip_hist[4]
+                k_val = chip_hist[5]
+                font_scale = 0.35
+                thickness = 1
+                x_offset = x + w + 5
+                y_offset = y + 12
+                cv2.putText(orig_img, f"R:{r_val:.2f}", (x_offset, y_offset), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
+                y_offset += 12
+                cv2.putText(orig_img, f"Y:{y_val:.2f}", (x_offset, y_offset), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
+                y_offset += 12
+                cv2.putText(orig_img, f"B:{b_val:.2f}", (x_offset, y_offset), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
+                y_offset += 12
+                cv2.putText(orig_img, f"W:{w_val:.2f}", (x_offset, y_offset), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
+                y_offset += 12
+                cv2.putText(orig_img, f"K:{k_val:.2f}", (x_offset, y_offset), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
     except Exception as e:
         logging.error(f"Error during classification: {e}")
     
-    return orig_img, num_detections, detected_boxes
+    return orig_img, num_detections, detected_boxes, label_counts
 
 
-def chip_path(directory: str, index: int, file_name: str):
+def chip_path(directory: str, index: int, file_name: str, label: str = None):
     parts = os.path.splitext(file_name)
-    return os.path.join(directory, parts[0]+'_'+ str(index)+parts[-1])
+    label_suffix = f"_{label}" if label else ""
+    return os.path.join(directory, parts[0] + '_' + str(index) + label_suffix + parts[-1])
 
 def remove_previous_chips(directory: str, index: int, file_name: str):
     while True:

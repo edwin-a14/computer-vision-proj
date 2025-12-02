@@ -29,7 +29,7 @@ data/raw/
       └── stop_sign_annotations_converted.txt
 ```
 
-### 3. Prepare Training Data
+### 3. Prepare Training Data & Generate Color Signatures
 
 ```bash
 # Step 1: Extract chips from Kaggle dataset
@@ -44,6 +44,9 @@ python3 src/augment_training_data.py --augmentations 15 --balance-ratio 0.8
 
 # Check your dataset size
 python3 -c "from pathlib import Path; print(f'Stop signs: {len(list(Path(\"data/processed/chips_augmented/train/stop\").glob(\"*\")))}'); print(f'Background: {len(list(Path(\"data/processed/chips_augmented/train/bg\").glob(\"*\")))}')"
+
+# Step 4: Generate color signatures (required before detection)
+python3 src/color_shape_prep.py
 ```
 
 ### 4. Train Classifiers
@@ -78,6 +81,7 @@ python3 src/detect_color_shape.py \
     --cnn-model computations/cnn_checkpoints/best_model.pth \
     --threshold 0.4
 ```
+
 
 ### 6. Evaluate Results
 
@@ -143,6 +147,7 @@ computer-vision-proj/
 │   │       ├── stop_sign/
 │   │       └── stop_sign_annotations_converted.txt
 │   │
+│   ├── graphs/                      # Color signature visualization outputs (pie + RGB scatter)
 │   └── processed/
 │       ├── chips/                     # Original training chips
 │       │   ├── train/{stop,bg}/
@@ -156,6 +161,7 @@ computer-vision-proj/
 │       ├── found_chips_cnn/           # CNN detections
 │       ├── found_chips_ensemble/      # Ensemble detections
 │       ├── evaluation_results.json    # Evaluation metrics
+│       ├── color_signatures.json      # Learned color composition (incl. black bin)
 │       └── classifier_comparison/     # Comparison visualizations
 │
 ├── computations/
