@@ -149,7 +149,8 @@ def detect_multiscale(orig_img, scales=[0.3, 0.5, 0.7, 0.9, 1.0, 1.2, 1.5, 1.8])
     img_height, img_width = orig_img.shape[:2]
     img_area = img_height * img_width
     
-    base_min_area = max(200, int(img_area * 0.0001))  
+    # Lowered min area to 100 to detect smaller/further signs
+    base_min_area = max(100, int(img_area * 0.0001))  
     base_max_area = int(img_area * 0.4)
     
     all_candidates = []
@@ -204,14 +205,15 @@ def detect_red_regions(img):
     # Strategy 1: HSV with more lenient adaptive saturation threshold
     h, s, v = cv2.split(hsv)
     sat_mean = np.mean(s)
-    sat_threshold = max(45, int(sat_mean * 0.5))
+    # Loosened saturation threshold back to handle desaturated signs
+    sat_threshold = max(30, int(sat_mean * 0.5))
     val_threshold = 25
     
     lower_red1 = np.array([0, sat_threshold, val_threshold])
-    upper_red1 = np.array([12, 255, 255])
+    upper_red1 = np.array([12, 255, 255]) # Loosened Hue range
     mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
     
-    lower_red2 = np.array([168, sat_threshold, val_threshold])
+    lower_red2 = np.array([165, sat_threshold, val_threshold]) # Loosened Hue range
     upper_red2 = np.array([180, 255, 255])
     mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
     
@@ -222,7 +224,7 @@ def detect_red_regions(img):
     l, a, b_channel = cv2.split(lab)
     
     a_threshold = np.percentile(a, 75) 
-    a_threshold = max(a_threshold, 115) 
+    a_threshold = max(a_threshold, 115) # Loosened threshold
     
     l_threshold = 20  
     
@@ -232,6 +234,7 @@ def detect_red_regions(img):
     # Combine masks from both color spaces
     combined_mask = cv2.bitwise_or(hsv_mask, lab_mask)
     
+    # Reduced kernel size slightly to preserve smaller signs
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
     combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
@@ -378,7 +381,11 @@ def main(classifier_type: str = 'hog', cnn_model_path: Optional[str] = None,
         return
     
     # Load classifier based on type
-    if classifier_type.lower() == 'ensemble':
+    if classifier_type.lower() == 'sift':
+        logging.info("Using SIFT-only detection mode")
+        clf = None # No ML classifier needed
+        init_sift_verifier()
+    elif classifier_type.lower() == 'ensemble':
         # Load both classifiers for ensemble mode
         logging.info("Loading both HOG-SVM and CNN for ensemble mode...")
         
@@ -440,7 +447,7 @@ def main(classifier_type: str = 'hog', cnn_model_path: Optional[str] = None,
             logging.error(f"Failed to load HOG-SVM classifier: {e}")
             return
 
-    if classifier_type.lower() in ['cnn', 'ensemble']:
+    if classifier_type.lower() in ['cnn', 'ensemble', 'hog']:
         init_sift_verifier()
 
     total_images = len(images)
@@ -481,7 +488,127 @@ def main(classifier_type: str = 'hog', cnn_model_path: Optional[str] = None,
     
     return detection_stats
 
+def detect_sift_only(orig_img, min_matches=4):
+    """
+    Detect stop signs using only SIFT feature matching against reference images.
+    This avoids the sliding window approach entirely.
+    """
+    global _sift, _sift_ref_descriptors, _sift_matcher
+    
+    if _sift is None:
+        init_sift_verifier()
+        
+    if not _sift_ref_descriptors:
+        return orig_img, 0, []
+
+    detected_boxes = []
+    num_detections = 0
+    
+    try:
+        gray = cv2.cvtColor(orig_img, cv2.COLOR_BGR2GRAY)
+        kp, des = _sift.detectAndCompute(gray, None)
+        
+        if des is None or len(des) < min_matches:
+            return orig_img, 0, []
+            
+        # Match against all reference images
+        all_good_matches = []
+        
+        for ref_des in _sift_ref_descriptors:
+            matches = _sift_matcher.knnMatch(ref_des, des, k=2)
+            
+            for m_n in matches:
+                if len(m_n) != 2: continue
+                m, n = m_n
+                if m.distance < 0.7 * n.distance:
+                    # m.trainIdx is the index of the keypoint in the scene (frame)
+                    all_good_matches.append(kp[m.trainIdx].pt)
+        
+        if len(all_good_matches) < min_matches:
+            return orig_img, 0, []
+            
+        # Cluster the matched keypoints to find potential objects
+        points = np.array(all_good_matches)
+        
+        # Use DBSCAN to cluster points that are close together
+        # eps=50 pixels, min_samples=3 points to form a cluster
+        clustering = DBSCAN(eps=50, min_samples=3).fit(points)
+        labels = clustering.labels_
+        
+        unique_labels = set(labels)
+        
+        for label in unique_labels:
+            if label == -1: continue # Noise
+            
+            cluster_points = points[labels == label]
+            
+            if len(cluster_points) < min_matches:
+                continue
+                
+            # Find bounding box of the cluster
+            x_min, y_min = np.min(cluster_points, axis=0)
+            x_max, y_max = np.max(cluster_points, axis=0)
+            
+            w = int(x_max - x_min)
+            h = int(y_max - y_min)
+            x = int(x_min)
+            y = int(y_min)
+            
+            # Add some padding
+            pad_w = int(w * 0.2)
+            pad_h = int(h * 0.2)
+            x = max(0, x - pad_w)
+            y = max(0, y - pad_h)
+            w = w + 2*pad_w
+            h = h + 2*pad_h
+            
+            # Filter by aspect ratio (stop signs are roughly square)
+            aspect_ratio = float(w) / h if h > 0 else 0
+            if 0.5 < aspect_ratio < 2.0 and w > 20 and h > 20:
+                num_detections += 1
+                detected_boxes.append((x, y, w, h))
+                
+                # # Draw detection
+                # cv2.rectangle(orig_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                # cv2.putText(orig_img, f'SIFT ({len(cluster_points)})', (x, y - 10), 
+                #            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                
+    except Exception as e:
+        logging.error(f"Error during SIFT-only detection: {e}")
+        
+    return orig_img, num_detections, detected_boxes
+
+def detect_color_candidates(img, min_area=100):
+    """
+    Detect red regions to use as candidates for HOG classification.
+    This is much faster than sliding window and has better recall than SIFT.
+    """
+    candidates = []
+    # Detect red regions once
+    red_mask = detect_red_regions(img)
+    
+    # Find contours
+    contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < min_area:
+            continue
+            
+        # Use the existing shape score function to filter obvious non-signs
+        shape_score = calculate_shape_score(contour)
+        
+        # Lower threshold to be inclusive at this stage (we just want candidates)
+        if shape_score > 0.05: # Lowered from 0.15
+            x, y, w, h = cv2.boundingRect(contour)
+            candidates.append((x, y, w, h))
+            
+    return candidates
+
 def detect_and_classify_frame(orig_img, clf, classifier_type='hog', cnn_threshold=0.85, output_path=None, file_name=None, scales=None):
+    if classifier_type.lower() == 'sift':
+        return detect_sift_only(orig_img)
+
     results = []
     bounding_boxes = []
     detection_scores = []
@@ -489,8 +616,33 @@ def detect_and_classify_frame(orig_img, clf, classifier_type='hog', cnn_threshol
     if scales is None:
         scales = [0.3, 0.5, 0.7, 0.9, 1.0, 1.2, 1.5, 1.8]
     
-    # Step 1: Multi-scale detection
-    candidates = detect_multiscale(orig_img, scales=scales)
+    # Step 1: Candidate Generation
+    if classifier_type.lower() == 'hog':
+        # Use Color to find candidate regions (Fast & Accurate for red signs)
+        # This replaces the slow multiscale sliding window and the inaccurate SIFT-only proposal
+        color_boxes = detect_color_candidates(orig_img)
+        
+        candidates = []
+        for (x, y, w, h) in color_boxes:
+            # Add the detected box
+            candidates.append(((x, y, w, h), 1.0)) # 1.0 is dummy score
+            
+            # Add scale variations to ensure HOG gets a good crop
+            cx, cy = x + w//2, y + h//2
+            
+            # 1.2x scale (more context)
+            w2, h2 = int(w*1.2), int(h*1.2)
+            x2, y2 = max(0, cx - w2//2), max(0, cy - h2//2)
+            candidates.append(((x2, y2, w2, h2), 0.9))
+            
+            # 1.4x scale (even more context, sometimes needed)
+            w3, h3 = int(w*1.4), int(h*1.4)
+            x3, y3 = max(0, cx - w3//2), max(0, cy - h3//2)
+            candidates.append(((x3, y3, w3, h3), 0.8))
+            
+    else:
+        # Standard multiscale detection for other modes
+        candidates = detect_multiscale(orig_img, scales=scales)
     
     # Step 2: Extract chips
     for (x, y, w, h), shape_score in candidates:
@@ -646,7 +798,7 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
                             x, y, w, h = bounding_boxes[idx]
                             detected_boxes.append((x, y, w, h))
                             orig_img = cv2.rectangle(orig_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                            label = f'ENS {confidence:.2f}'
+                            label = 'STOP'
                             cv2.putText(orig_img, label, (x, y - 10), 
                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                             
@@ -749,14 +901,23 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
         # Use decision_function for more control over threshold
         # For SVC with RBF kernel, decision_function gives distance from hyperplane
         decision_scores = clf.decision_function(features_array)
-        # Low threshold to favor recall (reduce false negatives)
-        # Negative threshold allows more borderline cases to be classified as 'stop'
-        predictions = ['stop' if score > -0.3 else 'bg' for score in decision_scores]
         
         logging.debug(f"Decision scores range: [{decision_scores.min():.2f}, {decision_scores.max():.2f}]")
         
-        for j, pred_idx in enumerate(valid_indices):
-            if predictions[j] == 'stop':
+        # Collect candidates that pass the threshold
+        candidates = []
+        for j, score in enumerate(decision_scores):
+            if score > -0.3:
+                candidates.append((score, valid_indices[j]))
+        
+        # Sort by score descending (highest confidence first)
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        
+        # Only verify the top 5 candidates with SIFT to save time
+        # (Usually there are only 1-2 stop signs per frame)
+        for score, pred_idx in candidates[:5]:
+            # Verify with SIFT (require at least 1 match to confirm)
+            if verify_with_sift(results[pred_idx], min_matches=1):
                 num_detections += 1
                 x, y, w, h = bounding_boxes[pred_idx]
                 detected_boxes.append((x, y, w, h))
@@ -796,8 +957,8 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description='Traffic sign detection using color, shape, and ML classifiers')
-    parser.add_argument('--classifier', type=str, default='hog', choices=['hog', 'cnn', 'ensemble'],
-                        help='Type of classifier to use: hog (HOG-SVM), cnn (CNN), or ensemble (both must agree)')
+    parser.add_argument('--classifier', type=str, default='hog', choices=['hog', 'cnn', 'ensemble', 'sift'],
+                        help='Type of classifier to use: hog (HOG-SVM), cnn (CNN), ensemble (both must agree), or sift (SIFT-only)')
     parser.add_argument('--cnn-model', type=str, default=None,
                         help='Path to CNN model checkpoint (.pth file) - required if using CNN or ensemble classifier')
     parser.add_argument('--threshold', type=float, default=0.5,

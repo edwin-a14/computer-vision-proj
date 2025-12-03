@@ -6,12 +6,12 @@ class LaneDetector:
         self.width = width
         self.height = height
         # ROI: Trapezoid at bottom of screen
-        # (Bottom-Left, Top-Left, Top-Right, Bottom-Right)
+        # Even larger ROI to capture lanes on wide roads/turns
         self.roi_vertices = np.array([[
-            (int(width * 0.1), height),
-            (int(width * 0.45), int(height * 0.6)),
-            (int(width * 0.55), int(height * 0.6)),
-            (int(width * 0.9), height)
+            (0, height),
+            (int(width * 0.1), int(height * 0.5)),
+            (int(width * 0.9), int(height * 0.5)),
+            (width, height)
         ]], dtype=np.int32)
 
     def region_of_interest(self, img):
@@ -23,17 +23,25 @@ class LaneDetector:
 
     def detect_lanes(self, frame):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
-        canny = cv2.Canny(blur, 50, 150)
+        
+        # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        # This helps when road and sidewalk have similar brightness
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        gray = clahe.apply(gray)
+        
+        # Increased blur kernel size to suppress road texture/cracks
+        blur = cv2.GaussianBlur(gray, (11, 11), 0)
+        # Increased thresholds to ignore faint edges
+        canny = cv2.Canny(blur, 80, 160) 
         cropped = self.region_of_interest(canny)
         
         lines = cv2.HoughLinesP(cropped,
                                 rho=2,
                                 theta=np.pi/180,
-                                threshold=50,
+                                threshold=60, 
                                 lines=np.array([]),
-                                minLineLength=40,
-                                maxLineGap=100)
+                                minLineLength=80, # Increased to filter short noise segments
+                                maxLineGap=150)
         
         line_image = np.zeros_like(frame)
         
