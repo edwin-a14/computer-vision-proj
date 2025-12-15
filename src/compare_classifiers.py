@@ -3,10 +3,8 @@ import json
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from pathlib import Path
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict
 import argparse
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -58,6 +56,9 @@ def create_side_by_side_comparison(image_name: str, hog_dir: str, cnn_dir: str, 
     plt.close()
     
     return True
+
+
+from utils import create_compact_visualization_for_image, remove_previous_outputs
 
 
 def generate_statistical_comparison(hog_stats: Dict, cnn_stats: Dict, output_dir: str):
@@ -249,104 +250,135 @@ def create_comparison_visualizations(hog_stats: Dict, cnn_stats: Dict, output_di
 def main():
     """Main comparison function."""
     parser = argparse.ArgumentParser(description='Compare classifier results')
-    parser.add_argument('--hog-dir', type=str, default='data/processed/found_chips_hog',
-                        help='Directory containing HOG-SVM results')
-    parser.add_argument('--cnn-dir', type=str, default='data/processed/found_chips_cnn',
-                        help='Directory containing CNN results')
-    parser.add_argument('--output-dir', type=str, default='data/processed/classifier_comparison',
-                        help='Directory to save comparison results')
     parser.add_argument('--max-comparisons', type=int, default=100,
                         help='Maximum number of side-by-side comparisons to generate (default: 100)')
     parser.add_argument('--skip-images', action='store_true',
                         help='Skip generating side-by-side image comparisons (only generate stats)')
     parser.add_argument('--prioritize-detections', action='store_true', default=True,
                         help='Prioritize showing images where at least one model detected something (default: True)')
-    
+    parser.add_argument('--generate-compacts', action='store_true',
+                        help='Generate compact visualizations for all images found in available classifier result directories')
     args = parser.parse_args()
-    
+
     logging.info("Starting classifier comparison...")
-    
-    if not os.path.exists(args.hog_dir):
-        logging.error(f"HOG-SVM results directory not found: {args.hog_dir}")
+
+    hog_dir = 'data/processed/found_chips_hog'
+    cnn_dir = 'data/processed/found_chips_cnn'
+    output_dir = 'data/processed/classifier_comparison'
+    hog_dir_exists = os.path.exists(hog_dir)
+    cnn_dir_exists = os.path.exists(cnn_dir)
+    if args.generate_compacts:
+        # Run compact generation over whichever classifier directories exist
+        hog_stats = {'images': 0, 'generated': 0}
+        cnn_stats = {'images': 0, 'generated': 0}
+        if hog_dir_exists:
+            hog_names = [n for n in os.listdir(hog_dir) if os.path.isdir(os.path.join(hog_dir, n))]
+            total_hog = len(hog_names)
+            for i, name in enumerate(hog_names):
+                sub = os.path.join(hog_dir, name)
+                if os.path.isdir(sub):
+                    # Remove previous compacts using standardized chip removal
+                    remove_previous_outputs(sub)
+                    hog_stats['images'] += 1
+                    out = create_compact_visualization_for_image(name, hog_dir, log=False)
+                    if out:
+                        hog_stats['generated'] += 1
+                if i % 50 == 0:
+                    logging.info(f"[HOG] [{i+1}/{total_hog}] Processing: {name}")
+        else:
+            logging.warning(f"HOG-SVM results directory not found: {hog_dir}")
+        if cnn_dir_exists:
+            cnn_names = [n for n in os.listdir(cnn_dir) if os.path.isdir(os.path.join(cnn_dir, n))]
+            total_cnn = len(cnn_names)
+            for j, name in enumerate(cnn_names):
+                sub = os.path.join(cnn_dir, name)
+                if os.path.isdir(sub):
+                    # Remove previous compacts using standardized chip removal
+                    remove_previous_outputs(sub)
+                    cnn_stats['images'] += 1
+                    out = create_compact_visualization_for_image(name, cnn_dir, log=False)
+                    if out:
+                        cnn_stats['generated'] += 1
+                if j % 50 == 0:
+                    logging.info(f"[CNN] [{j+1}/{total_cnn}] Processing: {name}")
+        else:
+            logging.warning(f"CNN results directory not found: {cnn_dir}")
+        logging.info(f"Compacts: HOG {hog_stats['generated']}/{hog_stats['images']} | CNN {cnn_stats['generated']}/{cnn_stats['images']}")
         return
-    
-    if not os.path.exists(args.cnn_dir):
-        logging.error(f"CNN results directory not found: {args.cnn_dir}")
+
+    if not hog_dir_exists:
+        logging.error(f"HOG-SVM results directory not found: {hog_dir}")
         return
-    
-    hog_stats_path = os.path.join(args.hog_dir, 'detection_stats_hog.json')
-    cnn_stats_path = os.path.join(args.cnn_dir, 'detection_stats_cnn.json')
-    
+    if not cnn_dir_exists:
+        logging.error(f"CNN results directory not found: {cnn_dir}")
+        return
+
+    hog_stats_path = os.path.join(hog_dir, 'detection_stats_hog.json')
+    cnn_stats_path = os.path.join(cnn_dir, 'detection_stats_cnn.json')
+
     if not os.path.exists(hog_stats_path):
         logging.error(f"HOG-SVM statistics not found: {hog_stats_path}")
         return
-    
+
     if not os.path.exists(cnn_stats_path):
         logging.error(f"CNN statistics not found: {cnn_stats_path}")
         return
-    
+
     hog_stats = load_detection_stats(hog_stats_path)
     cnn_stats = load_detection_stats(cnn_stats_path)
-    
-    os.makedirs(args.output_dir, exist_ok=True)
-    generate_statistical_comparison(hog_stats, cnn_stats, args.output_dir)
-    
+
+    os.makedirs(output_dir, exist_ok=True)
+    generate_statistical_comparison(hog_stats, cnn_stats, output_dir)
+
     if not args.skip_images:
         logging.info(f"Generating side-by-side comparisons (max {args.max_comparisons})...")
-        
-        # Create detection lookup for prioritization
+
         hog_detections_dict = {img['name']: img['detections'] for img in hog_stats['images_processed']}
         cnn_detections_dict = {img['name']: img['detections'] for img in cnn_stats['images_processed']}
-        
-        # Separate images into categories
+
         images_with_detections = []
         images_without_detections = []
-        
+
         for item in hog_stats['images_processed']:
             img_name = item['name']
             hog_count = hog_detections_dict.get(img_name, 0)
             cnn_count = cnn_detections_dict.get(img_name, 0)
-            
+
             if hog_count > 0 or cnn_count > 0:
-                # Prioritize images with more detections and disagreement
                 priority = max(hog_count, cnn_count) + abs(hog_count - cnn_count)
                 images_with_detections.append((img_name, priority, hog_count, cnn_count))
             else:
                 images_without_detections.append((img_name, 0, 0, 0))
-        
-        # Sort images with detections by priority (descending)
+
         images_with_detections.sort(key=lambda x: x[1], reverse=True)
-        
+
         if args.prioritize_detections:
-            # Prioritize images with detections
             selected_images = images_with_detections[:args.max_comparisons]
-            
-            # If we have room, add some without detections for completeness
             remaining = args.max_comparisons - len(selected_images)
             if remaining > 0:
                 selected_images.extend(images_without_detections[:remaining])
-            
             logging.info(f"  Prioritizing images with detections:")
             logging.info(f"    - {len([x for x in selected_images if x[2] > 0 or x[3] > 0])} with detections")
             logging.info(f"    - {len([x for x in selected_images if x[2] == 0 and x[3] == 0])} without detections")
         else:
             all_images = images_with_detections + images_without_detections
             selected_images = all_images[:args.max_comparisons]
-        
+
         successful = 0
         for i, (img_name, priority, hog_count, cnn_count) in enumerate(selected_images):
-            if i % 10 == 0:
-                logging.info(f"  Processing {i+1}/{len(selected_images)}")
-            
+            if i % 50 == 0:
+                logging.info(f"  Processing {i+1}/{len(selected_images)}: {img_name}")
+
             image_name = os.path.splitext(img_name)[0]
-            if create_side_by_side_comparison(image_name, args.hog_dir, args.cnn_dir, args.output_dir):
+            # Only generate compacts if --generate-compacts is set (handled above)
+            if create_side_by_side_comparison(image_name, hog_dir, cnn_dir, output_dir):
                 successful += 1
-        
+
         logging.info(f"Generated {successful} side-by-side comparisons")
         logging.info(f"  Images with at least one detection: {len(images_with_detections)}")
         logging.info(f"  Images with no detections: {len(images_without_detections)}")
-    
-    logging.info(f"Comparison complete! Results saved to: {args.output_dir}")
+
+    logging.info(f"Comparison complete! Results saved to: {output_dir}")
 
 
 if __name__ == '__main__':

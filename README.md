@@ -126,6 +126,8 @@ python3 src/process_video.py \
 ```
 computer-vision-proj/
 ├── src/
+│   ├── color_shape_prep.py           # Color mask logic, color signatures, and histogram utilities
+│   ├── utils.py                      # Utility functions (I/O, white balance, overlays, etc.)
 │   ├── data_prep.py                  # Extract chips from Kaggle dataset
 │   ├── process_caltech_dataset.py    # Integrate Caltech101 stop signs
 │   ├── augment_training_data.py      # Data augmentation pipeline
@@ -133,6 +135,7 @@ computer-vision-proj/
 │   ├── cnn_baseline.py               # Train CNN classifier
 │   ├── cnn_model.py                  # CNN wrapper for detection
 │   ├── detect_color_shape.py         # Main detection pipeline
+│   ├── sample_pixels.py              # Interactive tool for color mask threshold exploration
 │   ├── evaluate_detections.py        # Evaluate against ground truth
 │   ├── analyze_false_negatives.py    # Analyze missed detections
 │   ├── compare_classifiers.py        # Compare classifier results
@@ -165,11 +168,12 @@ computer-vision-proj/
 │       └── classifier_comparison/     # Comparison visualizations
 │
 ├── computations/
+│   ├── color_signatures.json         # Color histogram signatures for stop sign detection
+│   ├── cnn_checkpoints/              # CNN model checkpoints
+│   │   ├── best_model.pth            # Best model (highest val accuracy)
+│   │   ├── last_model.pth            # Last epoch
+│   │   └── history.json              # Training history
 │   ├── hog_svm_stop_and_bg.pkl       # Trained HOG-SVM model
-│   └── cnn_checkpoints/              # CNN model checkpoints
-│       ├── best_model.pth            # Best model (highest val accuracy)
-│       ├── last_model.pth            # Last epoch
-│       └── history.json              # Training history
 │
 ├── FALSE_NEGATIVE_IMPROVEMENTS.md     # Detailed improvement documentation
 ├── IMPROVEMENTS_APPLIED.md            # Verification of applied changes

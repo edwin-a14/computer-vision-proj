@@ -1,14 +1,14 @@
+
 """
 Color Shape Preparation Tool
-=============================
-Extracts color histograms from labeled chip images, clusters color variations by sign type
-using PCA, and saves color signatures for later comparison in detection pipelines.
+===========================
+Extracts color histograms from labeled chip images, clusters color variations by sign type,
+and saves color signatures for later comparison in detection pipelines.
 
 Features:
-- Extracts 8 primary hue channels (Red, Orange, Yellow, Green, Cyan, Blue, Magenta, White/Gray)
+- Extracts 7 traffic-relevant color bins (Red, Yellow, Blue, Orange, White/Gray, Black, Other)
 - Computes HSV histograms for each sign type
-- Applies PCA to identify most varied color dimensions per sign type
-- Saves clustered color signatures to JSON for efficient comparison
+- Saves color signatures to JSON for efficient comparison
 """
 
 import os
@@ -18,7 +18,6 @@ import json
 import logging
 from typing import Dict, List, Tuple
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 
 def validate_histogram_against_signature(
     chip_hist: np.ndarray,
@@ -27,14 +26,14 @@ def validate_histogram_against_signature(
     std_multiplier: float = 1.5,
     presence_epsilon: float = 0.01,
     require_ratio: bool = True,
-    black_std_multiplier: float = 0.85,  # Stricter check for black if significant
 ) -> bool:
     """
     Validate a chip color histogram against a learned signature.
 
     - Checks per-bin composition for the first `primary_bins` (excluding 'other').
     - Uses log-space pairwise color ratios for significant colors when available.
-    - Applies stricter std multiplier to black bin if it's a significant color.
+    - Significant bins (mean - std > 0) enforce lower and upper bounds.
+    - Insignificant bins only enforce upper bounds.
 
     Returns True if the histogram matches the signature; otherwise False.
     """
@@ -44,28 +43,15 @@ def validate_histogram_against_signature(
 
         n_bins = min(primary_bins, len(chip_hist), len(mean_hist), len(std_hist))
 
-        # 1) Per-bin checks
         for i in range(n_bins):
             mean_val = mean_hist[i]
             std_val = std_hist[i]
-            
-            # Use stricter multiplier for black bin (index 5) even if not significant
-            if i == 5:
-                multiplier = black_std_multiplier
-                # For black, always check deviation from mean
-                if abs(chip_hist[i] - mean_val) > multiplier * std_val:
-                    return False
-            elif mean_val - std_val > 0:
-                # For significant bins, use asymmetric bounds: stricter lower, relaxed upper
-                lower_multiplier = 1.0  # Stricter lower bound
-                upper_multiplier = std_multiplier  # Normal upper bound
-                if chip_hist[i] < mean_val - lower_multiplier * std_val:
-                    return False
-                if chip_hist[i] > mean_val + upper_multiplier * std_val:
-                    return False
-            else:
-                if chip_hist[i] > mean_val + std_val:
-                    return False
+
+            lower_bound = mean_val - std_multiplier * std_val
+            upper_bound = mean_val + std_multiplier * std_val
+
+            if chip_hist[i] < lower_bound or chip_hist[i] > upper_bound:
+                return False
 
         # 2) Pairwise log-space ratio checks (optional)
         ratio_means = signature.get('pairwise_ratio_means')
@@ -123,56 +109,17 @@ COLOR_RANGES = {
 
 def build_color_masks(h, s, v, l_hls, img):
     """Build all color masks for the 7-bin histogram.
-    
-    Returns: dict with keys: red_mask, yellow_mask, blue_mask, orange_mask,
-             white_mask, black_mask, green_mask, saturated_primaries
+    Returns a dict with keys for each color mask used in the histogram extraction.
     """
-    # Green mask: only overlaps with yellow (hue 35-40), exclude from yellow only
-    green_mask = ((h >= 35) & (h <= 85)) & (s > 80) & (v > 50)
-    
-    # Primary color masks (only yellow needs green exclusion due to hue overlap at 35-40)
-    red_mask = (((h >= 0) & (h <= 12)) | ((h >= 168) & (h <= 180))) & (s > 40) & (v > 80)
-    yellow_mask = ((h >= 20) & (h <= 40)) & (s > 40) & (v > 80) & (~green_mask)
-    blue_mask = ((h >= 95) & (h <= 135)) & (s > 40) & (v > 80)
-    orange_mask = ((h >= 10) & (h <= 20)) & (s > 40) & (v > 80)
-    
-    # Exclusion masks
-    purple_mask = (h >= 135) & (h <= 145)
-    magenta_mask = ((h >= 145) & (h <= 170)) & (s > 40)
-    green_from_white_mask = ((h >= 35) & (h <= 95))
-    
-    # Apply purple exclusion to blue
-    blue_mask = blue_mask & (~purple_mask)
-    
-    # White criteria - multiple conditions
-    grayscale_mask = (s < 55) & (v > 150)
-    bright_mask = v > 220
-    lightness_mask = l_hls > 215
-    light_mask = (s < 65) & (v > 155)
-    very_light_color_mask = (s < 85) & (v > 195)
-    medium_light_gray_mask = (s < 50) & (v > 135)
-    white_criteria = grayscale_mask | bright_mask | lightness_mask | light_mask | very_light_color_mask | medium_light_gray_mask
-    
-    # Exclude saturated primaries and green from white
+    red_mask = (((h >= 0) & (h <= 12)) | ((h >= 168) & (h <= 180))) & (s >= 90) & (v >= 50)
+    orange_mask = ((h >= 10) & (h <= 20)) & (s >= 100) & (v >= 110) & (v <= 190) & (~red_mask)
+    yellow_mask = ((h >= 20) & (h <= 40)) & (s >= 100) & (v > 80) & (~red_mask) & (~orange_mask)
+    blue_mask = ((h >= 95) & (h <= 135)) & (s >= 100) & (v > 50) & (~red_mask) & (~orange_mask) & (~yellow_mask)
+    green_mask = ((h >= 35) & (h <= 85)) & (s > 80) & (v > 50) & (~red_mask) & (~orange_mask) & (~yellow_mask) & (~blue_mask)
     saturated_primaries = (red_mask | yellow_mask | blue_mask | orange_mask) & (s > 40)
-    exclude_from_white = saturated_primaries | magenta_mask | green_from_white_mask
-    white_mask = white_criteria & (~exclude_from_white)
-    
-    # Add very light desaturated pixels to white
-    other_mask = ~(saturated_primaries | white_mask)
-    lightest_other_mask = other_mask & (v > 200) & (s < 60) & (~green_from_white_mask)
-    white_mask = white_mask | lightest_other_mask
-    
-    # Black mask
-    rgb_b = img[:, :, 0]
-    rgb_g = img[:, :, 1]
-    rgb_r = img[:, :, 2]
-    max_rgb = np.maximum.reduce([rgb_r, rgb_g, rgb_b])
-    strict_low_triplet = (rgb_r < 60) & (rgb_g < 60) & (rgb_b < 60)
-    very_dark_value = v < 65
-    expanded_dark = (max_rgb < 82) & (v < 72) & (s < 170)
-    medium_gray_exclusion = (v >= 72) & (s < 35)
-    black_mask = (strict_low_triplet | very_dark_value | expanded_dark) & (~medium_gray_exclusion) & (~white_mask) & (~saturated_primaries)
+    white_mask = (((s <= 100) & (v >= 90)) | (v >= 230) | ((s <= 25) & (v >= 180)) | (l_hls >= 205)) & (~red_mask) & (~yellow_mask) & (~blue_mask) & (~orange_mask)
+    r = img[:, :, 2]; g = img[:, :, 1]; b = img[:, :, 0]
+    black_mask = ((((r < 60) & (g < 60) & (b < 60)) | (v < 65) | (((r < 82) & (g < 82) & (b < 82)) & (v < 72) & (s < 170))) & (~((v >= 72) & (s < 35))) & (~white_mask) & (~red_mask) & (~yellow_mask) & (~blue_mask) & (~orange_mask) & (~green_mask))
     
     return {
         'red_mask': red_mask,
@@ -187,23 +134,14 @@ def build_color_masks(h, s, v, l_hls, img):
 
 
 def extract_color_histogram(img):
-    """Extract histogram of 7 traffic-relevant color categories.
-
-    Categories (ordered):
-      0 red          : saturated red hues (stop sign body)
-      1 yellow       : saturated yellow hues (warning signs)
-      2 blue         : saturated blue hues (info/regulatory)
-      3 orange       : saturated orange slice (construction/caution)
-      4 white_light  : light / reflective / gray (letters, borders)
-      5 black        : dark text / symbols (low value)
-      6 other        : everything else (greens, background, excluded hues)
-
-    Separating black from 'other' reduces noise and enables later symbol analysis.
-    Returns a 7-bin normalized histogram.
+    """
+    Extract a 7-bin normalized histogram of traffic-relevant color categories from an image.
+    Bins: red, yellow, blue, orange, white_light, black, other.
     """
     if img is None or img.size == 0:
         return np.zeros(7, dtype=np.float32)
-    
+    # Histogram is computed on the provided image as-is (no WB applied here)
+
     try:
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         h, s, v = cv2.split(hsv)
@@ -212,43 +150,38 @@ def extract_color_histogram(img):
     except Exception:
         return np.zeros(5)
     height, width = h.shape
-    
+
     histogram = np.zeros(7, dtype=np.float32)
     total_pixels = float(height * width)
     if total_pixels <= 0:
         return np.ones(7, dtype=np.float32) / 7.0
 
     # Build all color masks using helper function
-    masks = build_color_masks(h, s, v, h_hls, img)
-    
-    # Compute histogram bins (green already excluded from primaries)
+    masks = build_color_masks(h, s, v, l_hls, img)
+
+    # Compute histogram bins
     histogram[0] = np.sum(masks['red_mask']) / total_pixels
     histogram[1] = np.sum(masks['yellow_mask']) / total_pixels
     histogram[2] = np.sum(masks['blue_mask']) / total_pixels
     histogram[3] = np.sum(masks['orange_mask']) / total_pixels
     histogram[4] = np.sum(masks['white_mask']) / total_pixels
     histogram[5] = np.sum(masks['black_mask']) / total_pixels
-    
-    specific_color_mask = masks['saturated_primaries'] | masks['white_mask'] | masks['black_mask']
-    other_mask = (~specific_color_mask) | masks['green_mask']
+
+    specific_color_mask = masks['red_mask'] | masks['yellow_mask'] | masks['blue_mask'] | masks['orange_mask'] | masks['green_mask'] | masks['white_mask'] | masks['black_mask']
+    other_mask = (~specific_color_mask)
     histogram[6] = np.sum(other_mask) / total_pixels
     return histogram
 
 
 def extract_hsv_histogram(img, h_bins=32, s_bins=32, v_bins=32):
     """
-    Extract full HSV histogram from an image.
-    
-    Args:
-        img: Input image (BGR)
-        h_bins, s_bins, v_bins: Number of bins for each HSV channel
-    
-    Returns:
-        Concatenated HSV histogram, normalized
+    Extract a full HSV histogram from an image and return the normalized concatenated result.
     """
     if img is None or img.size == 0:
         return np.zeros(h_bins + s_bins + v_bins)
     
+    # Histogram is computed on the provided image as-is (no WB applied here)
+
     try:
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     except:
@@ -268,14 +201,8 @@ def extract_hsv_histogram(img, h_bins=32, s_bins=32, v_bins=32):
 
 def load_chip_images_by_type(chip_base_path, split='train'):
     """
-    Load all chip images organized by sign type from disk.
-    
-    Args:
-        chip_base_path: Base path to chips (e.g., 'data/processed/chips')
-        split: Which split to load ('train', 'val', 'test')
-    
-    Returns:
-        Dict mapping sign_type -> list of image arrays
+    Load all chip images organized by sign type from disk for a given split.
+    Returns a dict mapping sign_type -> list of image arrays.
     """
     chips_by_type = {}
     split_path = os.path.join(chip_base_path, split)
@@ -313,13 +240,7 @@ def extract_color_signatures(chips_by_type: Dict[str, List[np.ndarray]],
                              use_primary_hues=True):
     """
     Extract color histograms from chips for each sign type.
-    
-    Args:
-        chips_by_type: Dict mapping sign_type -> list of chip images
-        use_primary_hues: If True, use 5 traffic sign colors; else use full HSV
-    
-    Returns:
-        Dict mapping sign_type -> {'num_samples': int, 'mean_histogram': array, 'std_histogram': array, 'histogram_dtype': str}
+    Returns a dict mapping sign_type -> signature statistics.
     """
     color_signatures = {}
     
@@ -353,7 +274,7 @@ def extract_color_signatures(chips_by_type: Dict[str, List[np.ndarray]],
         std_hist = np.std(histograms, axis=0)
 
         # Compute pairwise log-space color ratios (include black, exclude 'other')
-        # New indices: 0=R,1=Y,2=B,3=O,4=W,5=K,6=other
+        # indices: 0=R,1=Y,2=B,3=O,4=W,5=K,6=other
         if use_primary_hues and histograms.shape[1] == 7:
             primary_indices = [0, 1, 2, 3, 4, 5]
             primary_hists = histograms[:, primary_indices]
@@ -432,7 +353,7 @@ def extract_color_signatures(chips_by_type: Dict[str, List[np.ndarray]],
 
 
 def save_color_signatures(color_signatures: Dict, output_path: str):
-    """Save color signatures to JSON file."""
+    """Save color signatures to a JSON file."""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
     with open(output_path, 'w') as f:
@@ -442,7 +363,7 @@ def save_color_signatures(color_signatures: Dict, output_path: str):
 
 
 def load_color_signatures(json_path: str) -> Dict:
-    """Load color signatures from JSON file."""
+    """Load color signatures from a JSON file."""
     with open(json_path, 'r') as f:
         return json.load(f)
 
@@ -450,16 +371,7 @@ def load_color_signatures(json_path: str) -> Dict:
 def collect_color_pixels(chips_list, color_name):
     """
     Extract all RGB pixels from chips that fall within a specific color category.
-    
-    Uses HSV color space with saturation and value filters to exclude black/gray/dark pixels
-    from primary colors (red, yellow, blue) while capturing light grays and whites.
-    
-    Args:
-        chips_list: List of chip images (BGR)
-        color_name: Color category ('red', 'yellow', 'blue', 'white_light', 'other')
-    
-    Returns:
-        List of RGB tuples for pixels in this color range
+    Returns a list of RGB tuples for pixels in this color range.
     """
     color_pixels = []
 
@@ -526,15 +438,7 @@ def collect_color_pixels(chips_list, color_name):
 def visualize_color_signatures(color_signatures: Dict, output_dir: str, chips_by_type: Dict[str, List] = None):
     """
     Create visual representations of color signatures for each sign type.
-    
-    Generates:
-    1. Pie chart showing mean color distribution for the sign type
-    2. 3D scatter plot of actual chip pixel colors by color category
-    
-    Args:
-        color_signatures: Dict mapping sign_type -> signature data
-        output_dir: Directory to save visualization files
-        chips_by_type: Dict mapping sign_type -> list of chip images (for 3D scatter)
+    Generates a pie chart and (optionally) a 3D scatter plot for each sign type.
     """
     os.makedirs(output_dir, exist_ok=True)
     
@@ -559,13 +463,27 @@ def visualize_color_signatures(color_signatures: Dict, output_dir: str, chips_by
         logging.info(f"Creating visualizations for '{sign_type}'...")
         
         mean_hist = np.array(sig['mean_histogram'])
+        # Ensure pie chart always shows the 7 primary bins (R,Y,B,O,W,K,other).
+        # If the signature has fewer bins, pad with zeros; if more, take the first 7.
+        desired_bins = 7
+        mean_hist7 = np.zeros(desired_bins, dtype=float)
+        copy_n = min(len(mean_hist), desired_bins)
+        if copy_n > 0:
+            mean_hist7[:copy_n] = mean_hist[:copy_n]
+        # Normalize for display (avoid zero-sum for matplotlib.pie)
+        total = float(mean_hist7.sum())
+        if total <= 0.0:
+            # fallback: tiny uniform distribution
+            mean_hist7[:] = 1.0 / desired_bins
+        else:
+            mean_hist7 /= total
         num_samples = sig['num_samples']
         
         # Create figure with 2 subplots
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
         # --- Subplot 1: Pie Chart of Mean Color Distribution ---
-        ax1.pie(mean_hist, labels=color_names, autopct='%1.1f%%', startangle=90,
+        ax1.pie(mean_hist7, labels=color_names, autopct='%1.1f%%', startangle=90,
             colors=[np.array(color_rgb[cn]) / 255.0 for cn in color_names],
             wedgeprops=dict(edgecolor='w'))
         ax1.set_title(f'{sign_type.upper()} - Mean Color Distribution\n({num_samples} samples)', 
@@ -582,8 +500,10 @@ def visualize_color_signatures(color_signatures: Dict, output_dir: str, chips_by
         if sig.get('mean_ratios') is not None:
             mean_ratios = np.array(sig['mean_ratios'])
             std_ratios = np.array(sig['std_ratios'])
-            primary_color_names = ['red', 'yellow', 'blue', 'orange', 'white_light']
-            for i, color_name in enumerate(primary_color_names):
+            primary_color_names = ['red', 'yellow', 'blue', 'orange', 'white_light', 'black']
+            limit = min(len(primary_color_names), len(mean_ratios))
+            for i in range(limit):
+                color_name = primary_color_names[i]
                 ratio_val = mean_ratios[i] * 100
                 std_val = std_ratios[i] * 100
                 display_name = color_name.replace('_', '/')
@@ -683,7 +603,6 @@ def print_color_signature_summary(color_signatures: Dict):
     print("COLOR SIGNATURE SUMMARY")
     print("="*60)
 
-    # Updated color ordering matches histogram: red, yellow, blue, orange, white_light, black, other
     color_names = ['red', 'yellow', 'blue', 'orange', 'white_light', 'black', 'other']
 
     for sign_type, sig in color_signatures.items():
@@ -711,7 +630,8 @@ def main():
     # Configuration
     chip_base_path = os.path.join('data', 'processed', 'chips')
     split = 'train'  # Use training set for color signature extraction
-    output_json = os.path.join('data', 'processed', 'color_signatures.json')
+    # Save signatures to computations
+    output_json = os.path.join('computations', 'color_signatures.json')
     # Updated graphs directory moved directly under data/graphs
     graphs_output_dir = os.path.join('data', 'graphs')
     
@@ -735,7 +655,11 @@ def main():
         use_primary_hues=use_primary_hues
     )
     
-    # Save to JSON
+    # Ensure computations directory exists and save to JSON
+    try:
+        os.makedirs(os.path.dirname(output_json), exist_ok=True)
+    except Exception:
+        pass
     save_color_signatures(color_signatures, output_json)
     
     # Print summary
