@@ -941,16 +941,17 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
             # Default: assume STOP unless histogram validation says otherwise
             label = 'STOP'
 
-            # Apply histogram validation if not skipped, or if skipping and chip is BG and validate_bg is enabled
-            should_validate_histogram = not skip_histogram
-            if skip_histogram and validate_bg and predictions[j] != 'stop':
+            # Only apply histogram validation to STOP predictions unless validate_bg is enabled
+            should_validate_histogram = False
+            if predictions[j] == 'stop' and not skip_histogram:
+                should_validate_histogram = True
+            elif predictions[j] != 'stop' and validate_bg:
                 should_validate_histogram = True
 
+            chip_hist = None
             if should_validate_histogram:
                 # Extract chip histogram using centralized function
                 try:
-                    # Compute histogram on chip extracted from the WB full image
-                    x, y, w, h = bounding_boxes[pred_idx]
                     chip_wb = extract_chip_with_padding(wb_full_img, x, y, w, h, target_size=128, padding_ratio=0.0, keep_aspect_ratio=False)
                     chip_hist = extract_color_histogram(chip_wb).astype(float)
                 except Exception:
