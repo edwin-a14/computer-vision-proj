@@ -3,6 +3,7 @@ import csv
 import random
 import cv2
 import xml.etree.ElementTree as ET
+from utils import apply_gray_world, remove_previous_outputs
 
 # only want stop signs right now
 label_normalization = {
@@ -56,11 +57,14 @@ def create_chips(rows):
     for img_path, xmin, ymin, xmax, ymax, label, scene_id, split in rows:
         img = cv2.imread(img_path)
 
+        # Apply white balance to the full image once before cropping chips
+        img_wb = apply_gray_world(img)
+
         y_upper_bound, x_upper_bound = img.shape[:2]
 
         x0, y0 = max(0, xmin), max(0, ymin)
         x1, y1 = min(x_upper_bound - 1, xmax), min(y_upper_bound - 1, ymax)
-        chip = img[y0 : y1, x0 : x1]
+        chip = img_wb[y0 : y1, x0 : x1]
 
         if chip.size == 0:
             continue
@@ -121,11 +125,16 @@ def split_by_scene(rows, train=0.7, val=0.15, seed=1337):
 # Chips are then resized to 64 x 64 for consistency
 def create_background_chips(rows):
     base_output_path = os.path.join('data', 'processed', 'chips')
+    # Start fresh each run (overwrite behavior)
     count = 1
     
     for img_path, xmin, ymin, xmax, ymax, _, _, split in rows:
         img = cv2.imread(img_path)
-        y_upper_bound, x_upper_bound = img.shape[:2]
+        if img is None:
+            continue
+        # Apply white balance to the full image once before background crops
+        img_wb = apply_gray_world(img)
+        y_upper_bound, x_upper_bound = img_wb.shape[:2]
 
         chip_x0, chip_y0 = xmin, ymin
         chip_x1, chip_y1 = xmax, ymax
@@ -153,8 +162,13 @@ def create_background_chips(rows):
 
             bg_chip_x1, bg_chip_y1 = bg_chip_x0 + width, bg_chip_y0 + height
 
-            bg_chip = cv2.cvtColor(img[bg_chip_y0 : bg_chip_y1, bg_chip_x0 : bg_chip_x1], cv2.COLOR_BGR2GRAY)
-            bg_chip = cv2.resize(bg_chip, (CHIP_SIZE, CHIP_SIZE))
+            # Crop from white-balanced full image; keep color by default
+            crop = img_wb[bg_chip_y0 : bg_chip_y1, bg_chip_x0 : bg_chip_x1]
+            if crop.size == 0:
+                continue
+            # Optional: convert to grayscale for HOG-only experiments
+            # crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            bg_chip = cv2.resize(crop, (CHIP_SIZE, CHIP_SIZE), interpolation=cv2.INTER_AREA)
 
             split_path = os.path.join(base_output_path, split)
             bg_path = os.path.join(split_path, "bg")
@@ -162,9 +176,9 @@ def create_background_chips(rows):
             os.makedirs(split_path, exist_ok=True)
             os.makedirs(bg_path, exist_ok=True)
 
+            # Deterministic naming; will overwrite prior runs
             output_path = os.path.join(bg_path, f"bg_{count:06d}.png")
             cv2.imwrite(output_path, bg_chip)
-
             count += 1
 
 
@@ -172,6 +186,13 @@ def create_background_chips(rows):
 
 def prep_data():
     path_to_kaggle_roadsign = os.path.join("data", "raw", "kaggle_roadsign")
+    # Clean previous chips so counts don't increase across runs
+    chips_base = os.path.join('data', 'processed', 'chips')
+    for split in ['train', 'val', 'test']:
+        for label in ['stop', 'bg']:
+            dir_path = os.path.join(chips_base, split, label)
+            # Use utils.remove_previous_outputs to clear chips for each label/split
+            remove_previous_outputs(dir_path)
 
     rows = convert_kaggle_annotations_to_csv(
         os.path.join(path_to_kaggle_roadsign, 'annotations'), 

@@ -29,7 +29,7 @@ data/raw/
       └── stop_sign_annotations_converted.txt
 ```
 
-### 3. Prepare Training Data
+### 3. Prepare Training Data & Generate Color Signatures
 
 ```bash
 # Step 1: Extract chips from Kaggle dataset
@@ -44,6 +44,9 @@ python3 src/augment_training_data.py --augmentations 15 --balance-ratio 0.8
 
 # Check your dataset size
 python3 -c "from pathlib import Path; print(f'Stop signs: {len(list(Path(\"data/processed/chips_augmented/train/stop\").glob(\"*\")))}'); print(f'Background: {len(list(Path(\"data/processed/chips_augmented/train/bg\").glob(\"*\")))}')"
+
+# Step 4: Generate color signatures (required before detection)
+python3 src/color_shape_prep.py
 ```
 
 ### 4. Train Classifiers
@@ -78,6 +81,7 @@ python3 src/detect_color_shape.py \
     --cnn-model computations/cnn_checkpoints/best_model.pth \
     --threshold 0.4
 ```
+
 
 ### 6. Evaluate Results
 
@@ -157,11 +161,14 @@ computer-vision-proj/
 │   ├── data_prep.py                  # Extract chips from Kaggle dataset
 │   ├── process_caltech_dataset.py    # Integrate Caltech101 stop signs
 │   ├── augment_training_data.py      # Data augmentation pipeline
+│   ├── color_shape_prep.py           # Color hist logic, color signatures
 │   ├── hog_svm_baseline.py           # Train HOG-SVM classifier
 │   ├── cnn_baseline.py               # Train CNN classifier
 │   ├── cnn_model.py                  # CNN wrapper for detection
 │   ├── detect_color_shape.py         # Main detection pipeline
+│   ├── utils.py                      # Utility functions (I/O, WB, overlays)
 │   ├── evaluate_detections.py        # Evaluate against ground truth
+│   ├── sample_pixels.py              # Interactive tool for mask exploration
 │   ├── analyze_false_negatives.py    # Analyze missed detections
 │   ├── compare_classifiers.py        # Compare classifier results
 │   └── CVproject_cnn.ipynb           # Original notebook (reference)
@@ -175,6 +182,7 @@ computer-vision-proj/
 │   │       ├── stop_sign/
 │   │       └── stop_sign_annotations_converted.txt
 │   │
+│   ├── graphs/                      # Color signature visualization outputs (pie + RGB scatter)
 │   └── processed/
 │       ├── chips/                     # Original training chips
 │       │   ├── train/{stop,bg}/
@@ -188,14 +196,16 @@ computer-vision-proj/
 │       ├── found_chips_cnn/           # CNN detections
 │       ├── found_chips_ensemble/      # Ensemble detections
 │       ├── evaluation_results.json    # Evaluation metrics
+│       ├── color_signatures.json      # Learned color composition
 │       └── classifier_comparison/     # Comparison visualizations
 │
 ├── computations/
+│   ├── color_signatures.json         # Color histogram signatures for stop sign detection
+│   ├── cnn_checkpoints/              # CNN model checkpoints
+│   │   ├── best_model.pth            # Best model (highest val accuracy)
+│   │   ├── last_model.pth            # Last epoch
+│   │   └── history.json              # Training history
 │   ├── hog_svm_stop_and_bg.pkl       # Trained HOG-SVM model
-│   └── cnn_checkpoints/              # CNN model checkpoints
-│       ├── best_model.pth            # Best model (highest val accuracy)
-│       ├── last_model.pth            # Last epoch
-│       └── history.json              # Training history
 │
 ├── README.md                         
 └── requirements.txt                   # Python dependencies

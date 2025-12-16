@@ -1,0 +1,293 @@
+import os
+import cv2
+from typing import Optional
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib import gridspec
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def apply_gray_world(img_bgr, saturation_threshold: float = 0.5):
+    """Apply a simple per-channel Gray-World white balance (environment-safe)."""
+    if img_bgr is None or not hasattr(img_bgr, 'shape'):
+        return img_bgr
+    try:
+        img = img_bgr.astype(np.float32)
+        if img.size == 0 or img.ndim != 3 or img.shape[2] != 3:
+            return img_bgr
+        # Compute per-channel means and target gray
+        means = img.reshape(-1, 3).mean(axis=0)
+        gray = float(means.mean())
+        eps = 1e-6
+        gains = gray / (means + eps)
+        # Optional clamp to avoid extreme amplification
+        gains = np.clip(gains, 0.5, 2.5)
+        balanced = img * gains.reshape(1, 1, 3)
+        balanced = np.clip(balanced, 0, 255).astype(np.uint8)
+        return balanced
+    except Exception:
+        return img_bgr
+
+def draw_histogram_overlay(image, chip_hist, x: int, y: int, w: int, color=(0, 255, 0)):
+    if chip_hist is None or len(chip_hist) < 6:
+        return image
+    vals = [float(chip_hist[i]) for i in range(6)]
+    labels = ['R', 'Y', 'B', 'O', 'W', 'K']
+    font_scale = 0.35
+    thickness = 1
+    x_offset = x + w + 5
+    y_offset = y + 12
+    for lab, val in zip(labels, vals):
+        cv2.putText(image, f"{lab}:{val:.2f}", (x_offset, y_offset), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
+        y_offset += 12
+    return image
+
+
+def chip_path(directory: str, index: int, file_name: str, label: Optional[str] = None):
+    parts = os.path.splitext(file_name)
+    label_suffix = f"_{label}" if label else ""
+    return os.path.join(directory, parts[0] + '_' + str(index) + label_suffix + parts[-1])
+
+def save_chip(output_dir: str, base_name: str, index: int, image, label: Optional[str] = None, prefix: Optional[str] = None):
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        name = base_name
+        if prefix:
+            name = f"{prefix}"
+        parts = os.path.splitext(base_name if base_name else 'chip.png')
+        ext = parts[-1] if len(parts) > 1 and parts[-1] else '.png'
+        label_suffix = f"_{label}" if label else ""
+        filename = f"{(os.path.splitext(base_name)[0] if base_name else 'chip')}_{index}{label_suffix}{ext}" if not prefix else f"{prefix}_{index}{ext}"
+        path = os.path.join(output_dir, filename)
+        cv2.imwrite(path, image)
+        return path
+    except Exception:
+        return None
+
+
+def remove_previous_outputs(image_dir: str):
+    """
+    Recursively remove all files and subdirectories in the given directory except 'result.png'.
+    Cleans up all previous outputs before writing new ones.
+    """
+    import shutil
+    if not os.path.exists(image_dir):
+        return
+    try:
+        for file in os.listdir(image_dir):
+            fp = os.path.join(image_dir, file)
+            if file == 'result.png':
+                continue
+            if os.path.isfile(fp):
+                os.remove(fp)
+            elif os.path.isdir(fp):
+                shutil.rmtree(fp)
+    except Exception:
+        pass
+
+
+def _safe_imread(path: str, to_rgb: bool = False):
+    if not os.path.exists(path):
+        return None
+    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        return None
+    if to_rgb and len(img.shape) == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    return img
+
+def _make_montage(images, tile_h: int, tile_w: int, cols: int = 5):
+    if not images:
+        return None
+    tiles = []
+    for im in images:
+        if im is None:
+            continue
+        try:
+            resized = cv2.resize(im, (tile_w, tile_h), interpolation=cv2.INTER_AREA)
+            tiles.append(resized)
+        except Exception:
+            continue
+    if not tiles:
+        return None
+    cols = max(1, cols)
+    rows = (len(tiles) + cols - 1) // cols
+    blank = np.zeros_like(tiles[0])
+    while len(tiles) < rows * cols:
+        tiles.append(blank.copy())
+    row_imgs = []
+    for r in range(rows):
+        row = tiles[r*cols:(r+1)*cols]
+        row_imgs.append(np.hstack(row))
+    return np.vstack(row_imgs)
+
+def create_compact_visualization_for_image(image_base: str, classifier_dir: str, max_candidates: int = 12, log: bool = True) -> Optional[str]:
+    """Create a compact diagram using Matplotlib grid layout:
+    - Top row: HSV, LAB, Combined masks with labels (keeps aspect ratio).
+    - Middle: Annotated result image centered (keeps aspect ratio).
+    - Bottom: Candidate chips in a small grid, preserving aspect (no squashing).
+    Saves into the classifier/image subdirectory and returns output path, or None if nothing to visualize.
+    """
+    base_dir = os.path.join(classifier_dir, image_base)
+    if not os.path.exists(base_dir):
+        return None
+    if log:
+        logger.info(f"[compact] {classifier_dir}/{image_base} -> start")
+    debug_dir = os.path.join(base_dir, 'debug_masks')
+    cand_dir = os.path.join(base_dir, 'candidates')
+    result_path = os.path.join(base_dir, 'result.png')
+
+    hsv_path = os.path.join(debug_dir, f"{image_base}_hsv_mask_1.png")
+    lab_path = os.path.join(debug_dir, f"{image_base}_lab_mask_1.png")
+    comb_path = os.path.join(debug_dir, f"{image_base}_combined_mask_1.png")
+
+    hsv = _safe_imread(hsv_path)
+    lab = _safe_imread(lab_path)
+    comb = _safe_imread(comb_path)
+    # minimal: one condensed line for mask presence
+    if log:
+        logger.info(f"[compact] masks: hsv={'y' if hsv is not None else 'n'}, lab={'y' if lab is not None else 'n'}, comb={'y' if comb is not None else 'n'}")
+
+    has_any = any([hsv is not None, lab is not None, comb is not None]) or os.path.exists(cand_dir) or os.path.exists(result_path)
+    if not has_any:
+        return None
+
+    # Collect assets for plotting (convert BGR->RGB for matplotlib)
+    masks = []
+    for im, title in [(hsv, 'HSV'), (lab, 'LAB'), (comb, 'Combined')]:
+        if im is None:
+            continue
+        if len(im.shape) == 2:
+            im = cv2.cvtColor(im, cv2.COLOR_GRAY2BGR)
+        im_rgb = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+        masks.append((im_rgb, title))
+
+    cand_images = []
+    if os.path.exists(cand_dir):
+        files = [f for f in os.listdir(cand_dir) if f.endswith('.png')]
+        files.sort()
+        for f in files[:max_candidates]:
+            cand_images.append(_safe_imread(os.path.join(cand_dir, f)))
+    cand_montage = _make_montage(cand_images, tile_h=128, tile_w=128, cols=6)
+
+    result_img = _safe_imread(result_path)
+    result_rgb = None
+    if result_img is not None:
+        result_rgb = cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB)
+    if log:
+        logger.info(f"[compact] result={'y' if result_rgb is not None else 'n'}")
+
+    # Build figure using GridSpec to avoid squashing
+    # Shrink canvas and tighten spacing
+    fig = plt.figure(figsize=(11, 7.5), dpi=150)
+    fig.patch.set_facecolor('white')
+    # Three rows: masks (top), result (middle), chips single row (bottom)
+    gs = gridspec.GridSpec(3, 3, height_ratios=[1, 1, 0.7], width_ratios=[1, 1, 1], hspace=0.15, wspace=0.08)
+
+    # Top row: masks
+    for i in range(3):
+        ax = fig.add_subplot(gs[0, i])
+        ax.axis('off')
+        if i < len(masks):
+            img, title = masks[i]
+            ax.imshow(img)
+            ax.set_title(title, fontsize=10)
+        else:
+            ax.text(0.5, 0.5, '', ha='center', va='center')
+
+    # Middle center: result image
+    ax_mid_left = fig.add_subplot(gs[1, 0])
+    ax_mid_left.axis('off')
+    ax_mid_center = fig.add_subplot(gs[1, 1])
+    ax_mid_center.axis('off')
+    ax_mid_right = fig.add_subplot(gs[1, 2])
+    ax_mid_right.axis('off')
+    if result_rgb is not None:
+        ax_mid_center.imshow(result_rgb)
+        ax_mid_center.set_title('Annotated Result', fontsize=10)
+
+    # Bottom row: candidate chips grid
+    # Create up to max_candidates small subplots;
+    # Limit bottom chips similar to detection summaries
+    chip_cols = 4
+    # Prepare three groups corresponding to HSV/LAB/Combined
+    # Gather candidate images per mask source
+    groups = []
+    for subname in ['hsv', 'lab', 'combined']:
+        subdir = os.path.join(cand_dir, subname)
+        grp = []
+        if os.path.exists(subdir):
+            files = [f for f in os.listdir(subdir) if f.endswith('.png')]
+            files.sort()
+            for f in files[:min(len(files), chip_cols)]:
+                im = _safe_imread(os.path.join(subdir, f))
+                if im is None:
+                    continue
+                grp.append(cv2.cvtColor(im, cv2.COLOR_BGR2RGB))
+        groups.append(grp)
+    if log:
+        logger.info(f"[compact] chips: hsv={len(groups[0])}, lab={len(groups[1])}, comb={len(groups[2])}")
+    # Place groups into two stacked rows (rows 2 and 3)
+    # Single bottom row (row index 2): HSV, LAB, Combined
+    # Render fixed-size tiles to keep chip sizes uniform
+    tile_h, tile_w = 64, 64
+    for col_idx, group in enumerate(groups):
+        ax = fig.add_subplot(gs[2, col_idx])
+        ax.axis('off')
+        if group:
+            imgs = group[:chip_cols]
+            tiles = []
+            for img in imgs:
+                try:
+                    h, w = img.shape[:2]
+                    scale = min(tile_w / w, tile_h / h)
+                    new_w = max(1, int(w * scale))
+                    new_h = max(1, int(h * scale))
+                    thumb = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                    # center on tile
+                    tile = np.ones((tile_h, tile_w, 3), dtype=np.uint8) * 255
+                    y0 = (tile_h - new_h) // 2
+                    x0 = (tile_w - new_w) // 2
+                    tile[y0:y0+new_h, x0:x0+new_w] = thumb
+                    tiles.append(tile)
+                except Exception:
+                    continue
+            if tiles:
+                # pad with blank tiles to ensure constant width
+                while len(tiles) < chip_cols:
+                    tiles.append(np.ones((tile_h, tile_w, 3), dtype=np.uint8) * 255)
+                # insert small white spacers between tiles for separation
+                spacer_w = 6
+                spacer = np.ones((tile_h, spacer_w, 3), dtype=np.uint8) * 255
+                row_parts = []
+                for k, t in enumerate(tiles[:chip_cols]):
+                    row_parts.append(t)
+                    if k < chip_cols - 1:
+                        row_parts.append(spacer)
+                mosaic = np.hstack(row_parts)
+                ax.imshow(mosaic, interpolation='nearest')
+
+    out_path = os.path.join(base_dir, f"{image_base}_compact.png")
+    try:
+        fig.savefig(out_path, bbox_inches='tight')
+        plt.close(fig)
+        if log:
+            logger.info(f"[compact] saved -> {out_path}")
+        return out_path
+    except Exception:
+        try:
+            plt.close(fig)
+        except Exception:
+            pass
+        if log:
+            logger.warning(f"[compact] save failed -> {out_path}")
+        return None
+
+    out_path = os.path.join(base_dir, f"{image_base}_compact.png")
+    try:
+        cv2.imwrite(out_path, diagram)
+        return out_path
+    except Exception:
+        return None
