@@ -185,7 +185,7 @@ def build_red_masks(img, debug_ctx: Optional[dict] = None, skip_wb: bool = False
     return hsv_mask, lab_mask, combined_mask
 
 
-def detect_single_scale(img, min_area, max_area, shape_threshold=0.25, debug_ctx: Optional[dict] = None, use_combined_mask=False, skip_wb: bool = False):
+def detect_single_scale(img, min_area, max_area, shape_threshold=0.25, debug_ctx: Optional[dict] = None, combined_mask_only=False, skip_wb: bool = False):
     candidates = []  # list of tuples: ((x,y,w,h), shape_score, source)
     # Only override skip_wb if present in debug_ctx
     if debug_ctx and isinstance(debug_ctx, dict) and 'skip_wb' in debug_ctx:
@@ -197,7 +197,7 @@ def detect_single_scale(img, min_area, max_area, shape_threshold=0.25, debug_ctx
     for wb in wb_options:
         hsv_mask, lab_mask, combined_mask = build_red_masks(img, debug_ctx=debug_ctx, skip_wb=wb)
         suffix = '_nwb' if wb else '_wb'
-        if use_combined_mask:
+        if combined_mask_only:
             masks_to_check.append((combined_mask, f'combined{suffix}'))
         else:
             masks_to_check.extend([
@@ -229,7 +229,7 @@ def detect_single_scale(img, min_area, max_area, shape_threshold=0.25, debug_ctx
     return candidates
 
 
-def detect_multiscale(orig_img, scales=[0.3, 0.5, 0.7, 0.9, 1.0, 1.2, 1.5, 1.8], debug_ctx: Optional[dict] = None, use_combined_mask=False, skip_wb: bool = False):
+def detect_multiscale(orig_img, scales=[0.3, 0.5, 0.7, 0.9, 1.0, 1.2, 1.5, 1.8], debug_ctx: Optional[dict] = None, combined_mask_only=False, skip_wb: bool = False):
     # Detect traffic signs at multiple scales for better small/large sign detection.
 
     img_height, img_width = orig_img.shape[:2]
@@ -258,7 +258,7 @@ def detect_multiscale(orig_img, scales=[0.3, 0.5, 0.7, 0.9, 1.0, 1.2, 1.5, 1.8],
         scaled_max_area = int(base_max_area * (scale ** 2))
 
         # Detect at this scale
-        candidates = detect_single_scale(scaled_img, scaled_min_area, scaled_max_area, debug_ctx=debug_ctx, use_combined_mask=use_combined_mask, skip_wb=skip_wb)
+        candidates = detect_single_scale(scaled_img, scaled_min_area, scaled_max_area, debug_ctx=debug_ctx, combined_mask_only=combined_mask_only, skip_wb=skip_wb)
 
         # Scale bounding boxes back to original image coordinates
         for (x, y, w, h), shape_score, source in candidates:
@@ -556,17 +556,16 @@ def main(classifier_type: str = 'hog', cnn_model_path: Optional[str] = None,
     logging.info(f"Total runtime (seconds): {elapsed:.2f}")
     return detection_stats
 
-def detect_and_classify_frame(orig_img, clf, classifier_type='hog', cnn_threshold=0.85, output_path=None, file_name=None, scales=None, debug_shape=False, draw_hist: bool = False, debug_mask: bool = False, skip_wb: bool = False, skip_histogram: bool = False, validate_bg: bool = False, use_combined_mask: bool = False):
+def detect_and_classify_frame(orig_img, clf, classifier_type='hog', cnn_threshold=0.85, output_path=None, file_name=None, scales=None, debug_shape=False, draw_hist: bool = False, debug_mask: bool = False, skip_wb: bool = False, skip_histogram: bool = False, validate_bg: bool = False, combined_mask_only: bool = False):
+    # Step 0: White balance for histogram validation (unless skipped)
+    wb_full_img = apply_gray_world(orig_img) if not skip_wb else orig_img
+
+    # Step 1: Multi-scale detection
     results = []
     bounding_boxes = []
     detection_scores = []
-    
     if scales is None:
         scales = [0.3, 0.5, 0.7, 0.9, 1.0, 1.2, 1.5, 1.8]
-    # Apply white balance to the full image once for downstream histogram validation (unless skipped)
-    wb_full_img = apply_gray_world(orig_img) if not skip_wb else orig_img
-    
-    # Step 1: Multi-scale detection
     debug_ctx = None
     if debug_mask and output_path and file_name:
         debug_dir = os.path.join(output_path, 'debug_masks')
@@ -579,8 +578,8 @@ def detect_and_classify_frame(orig_img, clf, classifier_type='hog', cnn_threshol
             'prefix': os.path.splitext(file_name)[0],
             'save_masks': True,
         }
-    candidates = detect_multiscale(orig_img, scales=scales, debug_ctx=debug_ctx, use_combined_mask=use_combined_mask, skip_wb=skip_wb)
-    
+    candidates = detect_multiscale(orig_img, scales=scales, debug_ctx=debug_ctx, combined_mask_only=combined_mask_only, skip_wb=skip_wb)
+
     # Step 2: Extract chips
     candidate_sources = []
     for (x, y, w, h), shape_score, source in candidates:
@@ -590,7 +589,7 @@ def detect_and_classify_frame(orig_img, clf, classifier_type='hog', cnn_threshol
             bounding_boxes.append((x, y, w, h))
             detection_scores.append(shape_score)
             candidate_sources.append(source)
-    
+
     # Step 3: Apply Non-Maximum Suppression
     final_scores = []
     if len(bounding_boxes) > 0:
@@ -598,10 +597,9 @@ def detect_and_classify_frame(orig_img, clf, classifier_type='hog', cnn_threshol
         results = [results[i] for i in keep_indices]
         bounding_boxes = [bounding_boxes[i] for i in keep_indices]
         final_scores = [detection_scores[i] for i in keep_indices]
-    
-    # Save candidate chips with shape score overlay; optionally add histogram data overlay
+
+    # Step 4: Save candidate chips with overlays (optional)
     if debug_shape and output_path and file_name and len(bounding_boxes) > 0:
-        # Save candidates grouped by mask source (subfolder per mask type)
         cand_dir = os.path.join(output_path, 'candidates')
         for idx, (chip, score, src) in enumerate(zip(results, final_scores, candidate_sources), start=1):
             chip_annot = chip.copy()
@@ -619,7 +617,6 @@ def detect_and_classify_frame(orig_img, clf, classifier_type='hog', cnn_threshol
                             y_off += 12
                     except Exception:
                         pass
-                # Determine subfolder for mask source (e.g., hsv_wb, lab_nwb, etc.)
                 mask_type = src.split('_')[0] if '_' in src else src
                 mask_dir = os.path.join(cand_dir, mask_type)
                 os.makedirs(mask_dir, exist_ok=True)
@@ -627,40 +624,58 @@ def detect_and_classify_frame(orig_img, clf, classifier_type='hog', cnn_threshol
                 save_chip(mask_dir, os.path.splitext(file_name)[0], idx, chip_annot, prefix=f'cand_{src}')
             except Exception:
                 pass
-    
-    # Step 4: Classify and draw final detections
-    final_img, num_detections, detected_boxes, label_counts = test(results, bounding_boxes, final_scores, orig_img.copy(), clf, classifier_type, cnn_threshold, output_path, file_name, draw_hist=draw_hist, wb_full_img=wb_full_img, skip_histogram=skip_histogram, validate_bg=validate_bg)
-    
-    return final_img, num_detections, detected_boxes, label_counts
+
+    # Step 5: Classify and draw final detections
+    final_img, num_detections, detected_boxes, label_counts, detected_labels = test(
+        results, bounding_boxes, final_scores, orig_img.copy(), clf, classifier_type, cnn_threshold, output_path, file_name,
+        draw_hist=draw_hist, wb_full_img=wb_full_img, skip_histogram=skip_histogram, validate_bg=validate_bg, return_labels=True)
+    # detected_labels: list of labels (e.g., 'STOP', 'OTHER') for each detected box
+    # Return a list of (box, label) pairs
+    box_label_pairs = list(zip(detected_boxes, detected_labels))
+    return box_label_pairs
 
 def process_single_image(road_sign_image, directory_path, results_path, clf, 
                         classifier_type: str = 'hog', cnn_threshold: float = 0.85,
                         debug_shape: bool = False, draw_hist: bool = False, debug_mask: bool = False,
                         skip_wb: bool = False, skip_histogram: bool = False, validate_bg: bool = False,
-                        use_combined_mask: bool = False):
+                        combined_mask_only: bool = False):
 
     path = os.path.join(directory_path, road_sign_image)
     orig_img = cv2.imread(path)
-    
     if orig_img is None:
         logging.warning(f"Failed to read image: {road_sign_image}")
         return {'stop': 0, 'other': 0}
-    
+
     output_path = os.path.join(results_path, os.path.splitext(road_sign_image)[0])
     # Clean previous outputs (chips/candidates/validated) for this image BEFORE any outputs are written
     remove_previous_outputs(output_path)
-    final_img, num_detections, _, label_counts = detect_and_classify_frame(
+
+    # Get list of (box, label) pairs from detection/classification
+    box_label_pairs = detect_and_classify_frame(
         orig_img, clf, classifier_type, cnn_threshold, output_path, road_sign_image,
         debug_shape=debug_shape, draw_hist=draw_hist, debug_mask=debug_mask,
         skip_wb=skip_wb, skip_histogram=skip_histogram, validate_bg=validate_bg,
-        use_combined_mask=use_combined_mask
+        combined_mask_only=combined_mask_only
     )
+
+    # Draw overlays if requested (preserve all debug/overlay options)
+    final_img = orig_img.copy()
+    label_counts = {'stop': 0, 'other': 0}
+    for box, label in box_label_pairs:
+        x, y, w, h = box
+        color = (0, 255, 0) if label == 'STOP' else (0, 165, 255)
+        cv2.rectangle(final_img, (x, y), (x + w, y + h), color, 2)
+        cv2.putText(final_img, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        if label == 'STOP':
+            label_counts['stop'] += 1
+        else:
+            label_counts['other'] += 1
+
     cv2.imwrite(os.path.join(output_path, "result.png"), final_img)
-    
     return label_counts
 
 
-def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, classifier_type: str = 'hog', cnn_threshold: float = 0.85, output_path=None, file_name=None, draw_hist: bool = False, wb_full_img=None, skip_histogram: bool = False, validate_bg: bool = False):
+def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, classifier_type: str = 'hog', cnn_threshold: float = 0.85, output_path=None, file_name=None, draw_hist: bool = False, wb_full_img=None, skip_histogram: bool = False, validate_bg: bool = False, return_labels: bool = False):
     """
     Test detected chips using either HOG-SVM or CNN classifier, or ensemble.
     
@@ -675,16 +690,21 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
         output_path: Path to save detected chips
         file_name: Original image filename
         wb_full_img: White-balanced version of the full image for histogram extraction
-        
+        return_labels: If True, return detected_labels as fifth return value
     Returns:
         orig_img: Annotated image
         num_detections: Number of detections
         detected_boxes: List of detected bounding boxes [(x, y, w, h), ...]
         label_counts: Dict with counts by label {'stop': n, 'other': m}
+        detected_labels: List of labels for each detection (if return_labels is True)
     """
     detected_boxes = []
     label_counts = {'stop': 0, 'other': 0}
+    detected_labels = []
     if len(results) == 0:
+        # If no results, return empty outputs
+        if return_labels:
+            return orig_img, 0, [], label_counts, []
         return orig_img, 0, [], label_counts
     
     num_detections = 0
@@ -693,12 +713,9 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
     if classifier_type.lower() == 'ensemble':
         try:
             hog_clf, cnn_clf = clf
-            
-            # Get HOG-SVM predictions
             hog_predictions = []
             features = []
             valid_indices = []
-            
             for i, result in enumerate(results):
                 if result is None or result.size == 0:
                     continue
@@ -706,9 +723,7 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
                     continue
                 if result.shape[0] < 8 or result.shape[1] < 8:
                     continue
-                
                 try:
-                    # Extract features
                     hog_features = hog(result, orientations=9, pixels_per_cell=(8, 8),
                                       cells_per_block=(2, 2), block_norm='L2-Hys',
                                       channel_axis=2, feature_vector=True)
@@ -721,14 +736,11 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
                     hist_v = hist_v.flatten() / (hist_v.sum() + 1e-7)
                     color_features = np.concatenate([hist_h, hist_s, hist_v])
                     combined_features = np.concatenate([hog_features, color_features])
-                    
                     if np.isfinite(combined_features).all():
                         features.append(combined_features)
                         valid_indices.append(i)
                 except:
                     continue
-            
-            # Get HOG predictions
             if len(features) > 0:
                 features_array = np.array(features)
                 if hasattr(hog_clf, 'decision_function'):
@@ -736,51 +748,35 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
                     hog_predictions = ['stop' if score > -0.1 else 'bg' for score in decision_scores]
                 else:
                     hog_predictions = hog_clf.predict(features_array)
-            
-            # Get CNN predictions
             valid_results = [results[i] for i in valid_indices]
             if len(valid_results) > 0:
                 cnn_preds, cnn_confs = cnn_clf.predict_with_confidence(np.array(valid_results))
             else:
                 cnn_preds, cnn_confs = [], []
-            
-            # Smart Ensemble Logic: Combine classifiers + SIFT verification
             for j, idx in enumerate(valid_indices):
                 if j < len(hog_predictions) and j < len(cnn_preds):
-                    
                     is_stop = False
                     confidence = cnn_confs[j]
-                    #shape_score = scores[idx] if idx < len(scores) else 0
                     required_matches = 2
-                    
-                    # If strong CNN confidence, trust it
                     if cnn_preds[j] == 'stop' and confidence > 0.50:
                         is_stop = True
                         required_matches = 0
-                        
-                    # Moderate CNN + Minimal Verification
-                    # If CNN is > 0.50, we just need one SIFT match or HOG agreement
                     elif cnn_preds[j] == 'stop' and confidence > 0.50:
                         if hog_predictions[j] == 'stop':
                             is_stop = True
-                            required_matches = 0 # HOG confirms it
+                            required_matches = 0
                         else:
                             is_stop = True
-                            required_matches = 1 # Just 1 SIFT match needed
-                    
+                            required_matches = 1
                     if is_stop:
-                        # Verify with SIFT if required
                         if required_matches == 0 or verify_with_sift(results[idx], min_matches=required_matches):
-                            # If HOG says stop and CNN confidence is high, trust STOP without OTHER test
                             if j < len(hog_predictions) and hog_predictions[j] == 'stop' and confidence >= 0.85:
                                 label = 'STOP'
                             else:
-                                # Otherwise, apply color signature gating to decide STOP vs OTHER (unless skipped)
                                 label = 'STOP'
                                 if not skip_histogram:
                                     try:
                                         if _color_signatures and 'stop' in _color_signatures:
-                                            # Compute histogram on chip extracted from the WB full image
                                             x, y, w, h = bounding_boxes[idx]
                                             chip_wb = extract_chip_with_padding(wb_full_img, x, y, w, h, target_size=128, padding_ratio=0.0, keep_aspect_ratio=False)
                                             chip_hist = extract_color_histogram(chip_wb).astype(float)
@@ -792,7 +788,6 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
                                                 presence_epsilon=0.01,
                                                 require_ratio=True,
                                             )
-                                            # Draw histogram overlay if requested
                                             if draw_hist and chip_hist is not None and len(chip_hist) >= 6:
                                                 try:
                                                     draw_histogram_overlay(orig_img, chip_hist, x, y, w, (0, 255, 0) if all_within else (0, 165, 255))
@@ -801,8 +796,6 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
                                             label = 'STOP' if all_within else 'OTHER'
                                     except Exception:
                                         label = 'STOP'
-
-                            # Save validated chip before labeling
                             if output_path and file_name:
                                 try:
                                     val_dir = os.path.join(output_path, 'validated')
@@ -811,11 +804,10 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
                                     cv2.imwrite(os.path.join(val_dir, f"val_{len(os.listdir(val_dir))+1}.png"), chip_tmp)
                                 except Exception:
                                     pass
-
-                            # Record detection; count both STOP and OTHER
                             num_detections += 1
                             label_key = 'stop' if label == 'STOP' else 'other'
                             label_counts[label_key] += 1
+                            detected_labels.append(label)
                             x, y, w, h = bounding_boxes[idx]
                             detected_boxes.append((x, y, w, h))
                             color = (0, 255, 0) if label == 'STOP' else (0, 165, 255)
@@ -823,90 +815,70 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
                             display_text = f"ENS {confidence:.2f} {label}"
                             cv2.putText(orig_img, display_text, (x, y - 10), 
                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                            
                             if output_path and file_name:
                                 from utils import save_chip
                                 save_chip(output_path, os.path.splitext(file_name)[0], num_detections, results[idx], label=label)
         except Exception as e:
             logging.error(f"Error during ensemble classification: {e}")
-        
+        if 'return_labels' in locals() and return_labels:
+            return orig_img, num_detections, detected_boxes, label_counts, detected_labels
         return orig_img, num_detections, detected_boxes, label_counts
     
     # Use CNN classifier
     if classifier_type.lower() == 'cnn':
         try:
-            # Stack results into numpy array
             chips_array = np.array(results)
-            
-            # Get predictions with confidence scores
             predictions, confidences = clf.predict_with_confidence(chips_array)
-            
-            # DEBUG: Uncomment to save chips
-            # debug_dir = "debug_chips"
-            # os.makedirs(debug_dir, exist_ok=True)
-            # for i, chip in enumerate(results):
-            #     cv2.imwrite(os.path.join(debug_dir, f"chip_{i}.png"), chip)
-            
             confidence_threshold = cnn_threshold if cnn_threshold is not None else 0.85
-            
-            # Draw detections for predictions meeting threshold
             for i, (pred, conf) in enumerate(zip(predictions, confidences)):
                 if pred == 'stop' and conf >= confidence_threshold:
                     num_detections += 1
                     label_counts['stop'] += 1
+                    detected_labels.append('STOP')
                     x, y, w, h = bounding_boxes[i]
                     detected_boxes.append((x, y, w, h))
                     orig_img = cv2.rectangle(orig_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                    # Add label with confidence
                     label = f'STOP {conf:.2f}'
                     cv2.putText(orig_img, label, (x, y - 10), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                    
                     if output_path and file_name:
                         from utils import save_chip
                         save_chip(output_path, os.path.splitext(file_name)[0], num_detections, results[i])
         except Exception as e:
             logging.error(f"Error during CNN classification: {e}")
-        
+        if 'return_labels' in locals() and return_labels:
+            return orig_img, num_detections, detected_boxes, label_counts, detected_labels
         return orig_img, num_detections, detected_boxes, label_counts
     
     # Use HOG-SVM classifier
     features = []
     valid_indices = []
-    
+    # Extract features for each chip
     for i, result in enumerate(results):
         # Validate chip before feature extraction
         if result is None or result.size == 0:
             continue
-        
         if len(result.shape) != 3 or result.shape[2] != 3:
             continue
-        
         if result.shape[0] < 8 or result.shape[1] < 8:
             continue
-        
         try:
             # Extract improved features (HOG + color histograms)
             # Match the feature extraction from hog_svm_baseline.py
             hog_features = hog(result, orientations=9, pixels_per_cell=(8, 8),
                               cells_per_block=(2, 2), block_norm='L2-Hys',
                               channel_axis=2, feature_vector=True)
-            
             # Extract color histogram features
             hsv = cv2.cvtColor(result, cv2.COLOR_BGR2HSV)
             hist_h = cv2.calcHist([hsv], [0], None, [32], [0, 180])
             hist_s = cv2.calcHist([hsv], [1], None, [32], [0, 256])
             hist_v = cv2.calcHist([hsv], [2], None, [32], [0, 256])
-            
             hist_h = hist_h.flatten() / (hist_h.sum() + 1e-7)
             hist_s = hist_s.flatten() / (hist_s.sum() + 1e-7)
             hist_v = hist_v.flatten() / (hist_v.sum() + 1e-7)
-            
             color_features = np.concatenate([hist_h, hist_s, hist_v])
-            
             # Combine HOG and color features
             combined_features = np.concatenate([hog_features, color_features])
-            
             # Validate features
             if np.isfinite(combined_features).all():
                 features.append(combined_features)
@@ -914,22 +886,20 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
         except Exception as e:
             logging.debug(f"Skipping invalid chip at index {i}: {e}")
             continue
-    
     if len(features) == 0:
+        # No valid features extracted
+        if return_labels:
+            return orig_img, num_detections, detected_boxes, label_counts, detected_labels
         return orig_img, num_detections, detected_boxes, label_counts
-    
     try:
         features_array = np.array(features)
-        
         # Use decision_function for more control over threshold
         # For SVC with RBF kernel, decision_function gives distance from hyperplane
         decision_scores = clf.decision_function(features_array)
         # Low threshold to favor recall (reduce false negatives)
         # Negative threshold allows more borderline cases to be classified as 'stop'
         predictions = ['stop' if score > -0.3 else 'bg' for score in decision_scores]
-        
         logging.debug(f"Decision scores range: [{decision_scores.min():.2f}, {decision_scores.max():.2f}]")
-        
         for j, pred_idx in enumerate(valid_indices):
             # Evaluate all high-shape-score candidates even if HOG says 'bg'
             # Keep HOG gate for lower-score boxes to control false positives
@@ -982,6 +952,7 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
             num_detections += 1
             label_key = 'stop' if label == 'STOP' else 'other'
             label_counts[label_key] += 1
+            detected_labels.append(label)
             detected_boxes.append((x, y, w, h))
             if output_path and file_name:
                 from utils import save_chip
@@ -995,7 +966,8 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
                 draw_histogram_overlay(orig_img, chip_hist, x, y, w, color)
     except Exception as e:
         logging.error(f"Error during classification: {e}")
-    
+    if return_labels:
+        return orig_img, num_detections, detected_boxes, label_counts, detected_labels
     return orig_img, num_detections, detected_boxes, label_counts
 
 
@@ -1027,7 +999,7 @@ if __name__ == "__main__":
     # If specific images are provided, run a focused pass without scanning the dataset
     # By default, HSV, LAB, and combined masks are all used independently (not merged). If --combined-mask-only is set, use only the combined mask.
     import time
-    use_combined_mask = args.combined_mask_only
+    # Use args.<argname> directly for all CLI arguments
     if args.images:
         start_time = time.time()
         directory_path = "data/raw/kaggle_roadsign/images"
@@ -1078,7 +1050,7 @@ if __name__ == "__main__":
                     debug_shape=args.debug_shape_candidates, draw_hist=args.draw_hist,
                     debug_mask=args.debug_mask, skip_wb=args.skip_wb,
                     skip_histogram=args.skip_histogram, validate_bg=args.validate_bg,
-                    use_combined_mask=use_combined_mask
+                    combined_mask_only=args.combined_mask_only
                 )
                 num_detections = label_counts['stop'] + label_counts['other']
                 if num_detections > 0:
@@ -1117,7 +1089,7 @@ if __name__ == "__main__":
                 skip_wb=args.skip_wb,
                 skip_histogram=args.skip_histogram,
                 validate_bg=args.validate_bg,
-                use_combined_mask=use_combined_mask
+                combined_mask_only=args.combined_mask_only
             )
         else:
             main(
@@ -1130,5 +1102,5 @@ if __name__ == "__main__":
                 skip_wb=args.skip_wb,
                 skip_histogram=args.skip_histogram,
                 validate_bg=args.validate_bg,
-                use_combined_mask=use_combined_mask
+                combined_mask_only=args.combined_mask_only
             )

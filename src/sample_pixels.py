@@ -784,28 +784,6 @@ q = Quit
 
     
     def show(self):
-        """Display the interactive window."""
-        # Pre-launch dump: list sampled pixels currently captured by orange
-        try:
-            if build_color_masks is not None and hasattr(self, 'sampled_coords') and self.sampled_coords:
-                hsv = self.img_hsv
-                h, s, v = hsv[:,:,0], hsv[:,:,1], hsv[:,:,2]
-                l_hls = self.img_hls[:,:,1]
-                masks = build_color_masks(h, s, v, l_hls, self.img_bgr)
-                omask = masks.get('orange_mask')
-                if omask is not None:
-                    hits = []
-                    for (x, y) in self.sampled_coords:
-                        if omask[y, x]:
-                            hits.append((x, y, tuple(self.img_hsv[y, x])))
-                    if hits:
-                        print(f"Orange-captured sampled pixels: {len(hits)}")
-                        for (x, y, hsv_tuple) in hits[:50]:
-                            print(f"  ({x},{y}) HSV={hsv_tuple}")
-                        if len(hits) > 50:
-                            print("  ... (truncated)")
-        except Exception:
-            pass
         plt.show()
 
 

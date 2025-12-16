@@ -294,39 +294,71 @@ def main():
         logging.info(f"Ensemble stats not found (optional) at {ensemble_stats_path}")
     
     # Print results
-    logging.info("="*70)
-    logging.info("DETECTION EVALUATION RESULTS")
-    logging.info("="*70)
+    print("\n" + "="*70)
+    print("DETECTION EVALUATION RESULTS")
+    print("="*70)
     
     for classifier_name, metrics in results.items():
-        logging.info(f"\n{classifier_name.upper()}:")
-        logging.info(f"  Dataset Statistics:")
-        logging.info(f"    Total images: {metrics['total_images']}")
-        logging.info(f"    Images with GT stop signs: {metrics['images_with_gt_stop_signs']}")
-        logging.info(f"    Images without GT stop signs: {metrics['images_without_gt_stop_signs']}")
-        logging.info(f"    Total GT stop signs: {metrics['total_gt_stop_signs']}")
-        logging.info(f"    Total GT other signs: {metrics['total_gt_other_signs']}")
-        logging.info(f"  Detection Statistics:")
-        logging.info(f"    Total detections: {metrics['total_detections']}")
-        logging.info(f"    True Positives (TP): {metrics['true_positives']}")
-        logging.info(f"    False Positives (FP): {metrics['false_positives']}")
-        logging.info(f"    False Negatives (FN): {metrics['false_negatives']}")
-        logging.info(f"    True Negatives - Other matched: {metrics['true_negatives_other']}")
-        logging.info(f"    Images with false positives: {metrics['images_with_false_positives']}")
-        logging.info(f"  Performance Metrics:")
-        logging.info(f"    Precision: {metrics['precision']:.3f} ({metrics['precision']*100:.1f}%)")
-        logging.info(f"    Recall: {metrics['recall']:.3f} ({metrics['recall']*100:.1f}%)")
-        logging.info(f"    F1-Score: {metrics['f1_score']:.3f}")
-        logging.info(f"    False Positive Rate: {metrics['false_positive_rate']:.3f} ({metrics['false_positive_rate']*100:.1f}% of detections)")
-        logging.info(f"    Avg detections per image: {metrics['avg_detections_per_image']:.2f}")
-    
+        print(f"\n{classifier_name.upper()}:")
+        print(f"  Dataset Statistics:")
+        print(f"    Total images: {metrics['total_images']}")
+        print(f"    Images with GT stop signs: {metrics['images_with_gt_stop_signs']}")
+        print(f"    Images without GT stop signs: {metrics['images_without_gt_stop_signs']}")
+        print(f"    Total GT stop signs: {metrics['total_gt_stop_signs']}")
+        print(f"    Total GT other signs: {metrics['total_gt_other_signs']}")
+        print(f"  Detection Statistics:")
+        print(f"    Total detections: {metrics['total_detections']}")
+        print(f"    True Positives (TP): {metrics['true_positives']}")
+        print(f"    False Positives (FP): {metrics['false_positives']}")
+        print(f"    False Negatives (FN): {metrics['false_negatives']}")
+        print(f"    True Negatives - Other matched: {metrics['true_negatives_other']}")
+        print(f"    Images with false positives: {metrics['images_with_false_positives']}")
+        print(f"  Performance Metrics:")
+        print(f"    Precision: {metrics['precision']:.3f} ({metrics['precision']*100:.1f}%)")
+        print(f"    Recall: {metrics['recall']:.3f} ({metrics['recall']*100:.1f}%)")
+        print(f"    F1-Score: {metrics['f1_score']:.3f}")
+        print(f"    False Positive Rate: {metrics['false_positive_rate']:.3f} ({metrics['false_positive_rate']*100:.1f}% of detections)")
+        print(f"    Avg detections per image: {metrics['avg_detections_per_image']:.2f}")
+
+    # Compact summary table
+    headers = [
+        "Classifier", "TP", "FP", "FN", "Precision", "Recall", "F1",
+        "Detections", "FP Rate", "Avg/Img"
+    ]
+    col_widths = [12, 6, 6, 6, 10, 10, 8, 11, 10, 8]
+
+    def row_line(cols, widths):
+        return " | ".join(str(c).ljust(w) for c, w in zip(cols, widths))
+
+    print("\n" + "-" * (sum(col_widths) + 3 * (len(col_widths) - 1)))
+    print(row_line(headers, col_widths))
+    print("-" * (sum(col_widths) + 3 * (len(col_widths) - 1)))
+
+    for name in ["hog_svm", "cnn", "ensemble"]:
+        if name in results:
+            m = results[name]
+            row = [
+                name.upper(),
+                m["true_positives"],
+                m["false_positives"],
+                m["false_negatives"],
+                f"{m['precision']:.3f}",
+                f"{m['recall']:.3f}",
+                f"{m['f1_score']:.3f}",
+                m["total_detections"],
+                f"{m['false_positive_rate']*100:.1f}%",
+                f"{m['avg_detections_per_image']:.2f}"
+            ]
+            print(row_line(row, col_widths))
+            print("-" * (sum(col_widths) + 3 * (len(col_widths) - 1)))
+
     # Save results
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, 'w') as f:
         json.dump(results, f, indent=2)
     
-    logging.info(f"Results saved to: {output_path}")
+    print(f"\nResults saved to: {output_path}")
 
 
 if __name__ == '__main__':
