@@ -141,6 +141,14 @@ python src/web/app.py
 
 Navigate to `http://127.0.0.1:5001` in your browser.
 
+To utilize Ngrok for external deployment, follow the CLI setup here: https://ngrok.com/docs/getting-started
+
+Then in the terminal do:
+
+```bash
+ngrok http 5001
+```
+
 ## Project Structure
 
 ```
@@ -189,8 +197,6 @@ computer-vision-proj/
 │       ├── last_model.pth            # Last epoch
 │       └── history.json              # Training history
 │
-├── FALSE_NEGATIVE_IMPROVEMENTS.md     # Detailed improvement documentation
-├── IMPROVEMENTS_APPLIED.md            # Verification of applied changes
-├── README.md                          # This file
+├── README.md                         
 └── requirements.txt                   # Python dependencies
 ```
