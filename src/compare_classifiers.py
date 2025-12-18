@@ -277,8 +277,7 @@ def main():
             for i, name in enumerate(hog_names):
                 sub = os.path.join(hog_dir, name)
                 if os.path.isdir(sub):
-                    # Remove previous compacts using standardized chip removal
-                    remove_previous_outputs(sub)
+                    # Do not remove previous outputs; keep candidate chips for compacts
                     hog_stats['images'] += 1
                     out = create_compact_visualization_for_image(name, hog_dir, log=False)
                     if out:
@@ -293,8 +292,7 @@ def main():
             for j, name in enumerate(cnn_names):
                 sub = os.path.join(cnn_dir, name)
                 if os.path.isdir(sub):
-                    # Remove previous compacts using standardized chip removal
-                    remove_previous_outputs(sub)
+                    # Do not remove previous outputs; keep candidate chips for compacts
                     cnn_stats['images'] += 1
                     out = create_compact_visualization_for_image(name, cnn_dir, log=False)
                     if out:

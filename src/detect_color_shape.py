@@ -193,17 +193,27 @@ def detect_single_scale(img, min_area, max_area, shape_threshold=0.25, debug_ctx
 
     # Consolidated mask generation: build masks for both wb and non-wb if not skipped, else just non-wb
     masks_to_check = []
-    wb_options = [False, True] if not skip_wb else [True]
-    for wb in wb_options:
-        hsv_mask, lab_mask, combined_mask = build_red_masks(img, debug_ctx=debug_ctx, skip_wb=wb)
-        suffix = '_nwb' if wb else '_wb'
+    if skip_wb:
+        # Only non-wb masks, no postfix
+        hsv_mask, lab_mask, combined_mask = build_red_masks(img, debug_ctx=debug_ctx, skip_wb=True)
         if combined_mask_only:
-            masks_to_check.append((combined_mask, f'combined{suffix}'))
+            masks_to_check.append((combined_mask, 'combined'))
         else:
             masks_to_check.extend([
-                (hsv_mask, f'hsv{suffix}'),
-                (lab_mask, f'lab{suffix}'),
-                (combined_mask, f'combined{suffix}')
+                (hsv_mask, 'hsv'),
+                (lab_mask, 'lab'),
+                (combined_mask, 'combined')
+            ])
+    else:
+        # Only wb masks, with _wb postfix
+        hsv_mask, lab_mask, combined_mask = build_red_masks(img, debug_ctx=debug_ctx, skip_wb=False)
+        if combined_mask_only:
+            masks_to_check.append((combined_mask, 'combined_wb'))
+        else:
+            masks_to_check.extend([
+                (hsv_mask, 'hsv_wb'),
+                (lab_mask, 'lab_wb'),
+                (combined_mask, 'combined_wb')
             ])
 
     contours = []
@@ -557,8 +567,8 @@ def main(classifier_type: str = 'hog', cnn_model_path: Optional[str] = None,
     return detection_stats
 
 def detect_and_classify_frame(orig_img, clf, classifier_type='hog', cnn_threshold=0.85, output_path=None, file_name=None, scales=None, debug_shape=False, draw_hist: bool = False, debug_mask: bool = False, skip_wb: bool = False, skip_histogram: bool = False, validate_bg: bool = False, combined_mask_only: bool = False):
-    # Step 0: White balance for histogram validation (unless skipped)
-    wb_full_img = apply_gray_world(orig_img) if not skip_wb else orig_img
+    # Step 0: No white balance for HOG evaluation
+    wb_full_img = orig_img
 
     # Step 1: Multi-scale detection
     results = []
@@ -672,6 +682,29 @@ def process_single_image(road_sign_image, directory_path, results_path, clf,
             label_counts['other'] += 1
 
     cv2.imwrite(os.path.join(output_path, "result.png"), final_img)
+
+    # --- Save debug mask versions and create debug visualization if debug_mask is enabled ---
+    if debug_mask:
+        debug_dir = os.path.join(output_path, 'debug_masks')
+        os.makedirs(debug_dir, exist_ok=True)
+        base_prefix = os.path.splitext(road_sign_image)[0]
+        from utils import save_chip, save_debug_mask_visualization
+        if skip_wb:
+            hsv_mask, lab_mask, combined_mask = build_red_masks(orig_img, skip_wb=True)
+            save_chip(debug_dir, base_prefix + '.png', 1, hsv_mask, prefix=f"{base_prefix}_hsv_mask")
+            save_chip(debug_dir, base_prefix + '.png', 1, lab_mask, prefix=f"{base_prefix}_lab_mask")
+            save_chip(debug_dir, base_prefix + '.png', 1, combined_mask, prefix=f"{base_prefix}_combined_mask")
+            save_debug_mask_visualization(debug_dir, base_prefix, final_img, hsv_mask, lab_mask, None, None)
+        else:
+            hsv_mask, lab_mask, combined_mask = build_red_masks(orig_img, skip_wb=True)
+            hsv_mask_wb, lab_mask_wb, combined_mask_wb = build_red_masks(orig_img, skip_wb=False)
+            save_chip(debug_dir, base_prefix + '.png', 1, hsv_mask, prefix=f"{base_prefix}_hsv_mask")
+            save_chip(debug_dir, base_prefix + '.png', 1, lab_mask, prefix=f"{base_prefix}_lab_mask")
+            save_chip(debug_dir, base_prefix + '.png', 1, combined_mask, prefix=f"{base_prefix}_combined_mask")
+            save_chip(debug_dir, base_prefix + '.png', 1, hsv_mask_wb, prefix=f"{base_prefix}_hsv_mask_wb")
+            save_chip(debug_dir, base_prefix + '.png', 1, lab_mask_wb, prefix=f"{base_prefix}_lab_mask_wb")
+            save_chip(debug_dir, base_prefix + '.png', 1, combined_mask_wb, prefix=f"{base_prefix}_combined_mask_wb")
+            save_debug_mask_visualization(debug_dir, base_prefix, final_img, hsv_mask, lab_mask, hsv_mask_wb, lab_mask_wb)
     return label_counts
 
 
@@ -701,14 +734,8 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
     detected_boxes = []
     label_counts = {'stop': 0, 'other': 0}
     detected_labels = []
-    if len(results) == 0:
-        # If no results, return empty outputs
-        if return_labels:
-            return orig_img, 0, [], label_counts, []
-        return orig_img, 0, [], label_counts
-    
     num_detections = 0
-    
+
     # Ensemble mode: both classifiers must agree
     if classifier_type.lower() == 'ensemble':
         try:
@@ -724,22 +751,21 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
                 if result.shape[0] < 8 or result.shape[1] < 8:
                     continue
                 try:
-                    hog_features = hog(result, orientations=9, pixels_per_cell=(8, 8),
-                                      cells_per_block=(2, 2), block_norm='L2-Hys',
-                                      channel_axis=2, feature_vector=True)
-                    hsv = cv2.cvtColor(result, cv2.COLOR_BGR2HSV)
-                    hist_h = cv2.calcHist([hsv], [0], None, [32], [0, 180])
-                    hist_s = cv2.calcHist([hsv], [1], None, [32], [0, 256])
-                    hist_v = cv2.calcHist([hsv], [2], None, [32], [0, 256])
-                    hist_h = hist_h.flatten() / (hist_h.sum() + 1e-7)
-                    hist_s = hist_s.flatten() / (hist_s.sum() + 1e-7)
-                    hist_v = hist_v.flatten() / (hist_v.sum() + 1e-7)
-                    color_features = np.concatenate([hist_h, hist_s, hist_v])
+                    hsv_img = cv2.cvtColor(result, cv2.COLOR_BGR2HSV)
+                    hog_features = hog(
+                        hsv_img,
+                        orientations=9,
+                        pixels_per_cell=(8, 8),
+                        cells_per_block=(2, 2),
+                        block_norm='L2-Hys',
+                        channel_axis=2,
+                        feature_vector=True
+                    )
+                    color_features = extract_color_histogram(result)
                     combined_features = np.concatenate([hog_features, color_features])
-                    if np.isfinite(combined_features).all():
-                        features.append(combined_features)
-                        valid_indices.append(i)
-                except:
+                    features.append(combined_features)
+                    valid_indices.append(i)
+                except Exception:
                     continue
             if len(features) > 0:
                 features_array = np.array(features)
@@ -755,72 +781,21 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
                 cnn_preds, cnn_confs = [], []
             for j, idx in enumerate(valid_indices):
                 if j < len(hog_predictions) and j < len(cnn_preds):
-                    is_stop = False
-                    confidence = cnn_confs[j]
-                    required_matches = 2
-                    if cnn_preds[j] == 'stop' and confidence > 0.50:
-                        is_stop = True
-                        required_matches = 0
-                    elif cnn_preds[j] == 'stop' and confidence > 0.50:
-                        if hog_predictions[j] == 'stop':
-                            is_stop = True
-                            required_matches = 0
-                        else:
-                            is_stop = True
-                            required_matches = 1
-                    if is_stop:
-                        if required_matches == 0 or verify_with_sift(results[idx], min_matches=required_matches):
-                            if j < len(hog_predictions) and hog_predictions[j] == 'stop' and confidence >= 0.85:
-                                label = 'STOP'
-                            else:
-                                label = 'STOP'
-                                if not skip_histogram:
-                                    try:
-                                        if _color_signatures and 'stop' in _color_signatures:
-                                            x, y, w, h = bounding_boxes[idx]
-                                            chip_wb = extract_chip_with_padding(wb_full_img, x, y, w, h, target_size=128, padding_ratio=0.0, keep_aspect_ratio=False)
-                                            chip_hist = extract_color_histogram(chip_wb).astype(float)
-                                            all_within = validate_histogram_against_signature(
-                                                chip_hist,
-                                                _color_signatures['stop'],
-                                                primary_bins=6,
-                                                std_multiplier=1.5,
-                                                presence_epsilon=0.01,
-                                                require_ratio=True,
-                                            )
-                                            if draw_hist and chip_hist is not None and len(chip_hist) >= 6:
-                                                try:
-                                                    draw_histogram_overlay(orig_img, chip_hist, x, y, w, (0, 255, 0) if all_within else (0, 165, 255))
-                                                except Exception:
-                                                    pass
-                                            label = 'STOP' if all_within else 'OTHER'
-                                    except Exception:
-                                        label = 'STOP'
-                            if output_path and file_name:
-                                try:
-                                    val_dir = os.path.join(output_path, 'validated')
-                                    os.makedirs(val_dir, exist_ok=True)
-                                    chip_tmp = results[idx].copy()
-                                    cv2.imwrite(os.path.join(val_dir, f"val_{len(os.listdir(val_dir))+1}.png"), chip_tmp)
-                                except Exception:
-                                    pass
-                            num_detections += 1
-                            label_key = 'stop' if label == 'STOP' else 'other'
-                            label_counts[label_key] += 1
-                            detected_labels.append(label)
-                            x, y, w, h = bounding_boxes[idx]
-                            detected_boxes.append((x, y, w, h))
-                            color = (0, 255, 0) if label == 'STOP' else (0, 165, 255)
-                            orig_img = cv2.rectangle(orig_img, (x, y), (x + w, y + h), color, 2)
-                            display_text = f"ENS {confidence:.2f} {label}"
-                            cv2.putText(orig_img, display_text, (x, y - 10), 
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                            if output_path and file_name:
-                                from utils import save_chip
-                                save_chip(output_path, os.path.splitext(file_name)[0], num_detections, results[idx], label=label)
+                    if hog_predictions[j] == 'stop' and cnn_preds[j] == 'stop' and cnn_confs[j] >= cnn_threshold:
+                        x, y, w, h = bounding_boxes[idx]
+                        detected_boxes.append((x, y, w, h))
+                        label_counts['stop'] += 1
+                        detected_labels.append('STOP')
+                        num_detections += 1
+                        color = (0, 255, 0)
+                        orig_img = cv2.rectangle(orig_img, (x, y), (x + w, y + h), color, 2)
+                        cv2.putText(orig_img, 'STOP', (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                    else:
+                        x, y, w, h = bounding_boxes[idx]
+                        detected_labels.append('OTHER')
         except Exception as e:
             logging.error(f"Error during ensemble classification: {e}")
-        if 'return_labels' in locals() and return_labels:
+        if return_labels:
             return orig_img, num_detections, detected_boxes, label_counts, detected_labels
         return orig_img, num_detections, detected_boxes, label_counts
     
@@ -846,129 +821,107 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
                         save_chip(output_path, os.path.splitext(file_name)[0], num_detections, results[i])
         except Exception as e:
             logging.error(f"Error during CNN classification: {e}")
-        if 'return_labels' in locals() and return_labels:
+        if return_labels:
             return orig_img, num_detections, detected_boxes, label_counts, detected_labels
         return orig_img, num_detections, detected_boxes, label_counts
     
     # Use HOG-SVM classifier
-    features = []
-    valid_indices = []
-    # Extract features for each chip
-    for i, result in enumerate(results):
-        # Validate chip before feature extraction
-        if result is None or result.size == 0:
-            continue
-        if len(result.shape) != 3 or result.shape[2] != 3:
-            continue
-        if result.shape[0] < 8 or result.shape[1] < 8:
-            continue
+    if classifier_type.lower() == 'hog':
+        features = []
+        valid_indices = []
+        for i, result in enumerate(results):
+            if result is None or result.size == 0:
+                continue
+            if len(result.shape) != 3 or result.shape[2] != 3:
+                continue
+            if result.shape[0] < 8 or result.shape[1] < 8:
+                continue
+            try:
+                hsv_img = cv2.cvtColor(result, cv2.COLOR_BGR2HSV)
+                hog_features = hog(
+                    hsv_img,
+                    orientations=9,
+                    pixels_per_cell=(8, 8),
+                    cells_per_block=(2, 2),
+                    block_norm='L2-Hys',
+                    channel_axis=2,
+                    feature_vector=True
+                )
+                hsv = hsv_img
+                hist_h = cv2.calcHist([hsv], [0], None, [32], [0, 180])
+                hist_s = cv2.calcHist([hsv], [1], None, [32], [0, 256])
+                hist_v = cv2.calcHist([hsv], [2], None, [32], [0, 256])
+                hist_h = hist_h.flatten() / (hist_h.sum() + 1e-7)
+                hist_s = hist_s.flatten() / (hist_s.sum() + 1e-7)
+                hist_v = hist_v.flatten() / (hist_v.sum() + 1e-7)
+                color_features = np.concatenate([hist_h, hist_s, hist_v])
+                combined_features = np.concatenate([hog_features, color_features])
+                if np.isfinite(combined_features).all():
+                    features.append(combined_features)
+                    valid_indices.append(i)
+            except Exception as e:
+                logging.debug(f"Skipping invalid chip at index {i}: {e}")
+                continue
+        if len(features) == 0:
+            if return_labels:
+                return orig_img, num_detections, detected_boxes, label_counts, detected_labels
+            return orig_img, num_detections, detected_boxes, label_counts
         try:
-            # Extract improved features (HOG + color histograms)
-            # Match the feature extraction from hog_svm_baseline.py
-            hog_features = hog(result, orientations=9, pixels_per_cell=(8, 8),
-                              cells_per_block=(2, 2), block_norm='L2-Hys',
-                              channel_axis=2, feature_vector=True)
-            # Extract color histogram features
-            hsv = cv2.cvtColor(result, cv2.COLOR_BGR2HSV)
-            hist_h = cv2.calcHist([hsv], [0], None, [32], [0, 180])
-            hist_s = cv2.calcHist([hsv], [1], None, [32], [0, 256])
-            hist_v = cv2.calcHist([hsv], [2], None, [32], [0, 256])
-            hist_h = hist_h.flatten() / (hist_h.sum() + 1e-7)
-            hist_s = hist_s.flatten() / (hist_s.sum() + 1e-7)
-            hist_v = hist_v.flatten() / (hist_v.sum() + 1e-7)
-            color_features = np.concatenate([hist_h, hist_s, hist_v])
-            # Combine HOG and color features
-            combined_features = np.concatenate([hog_features, color_features])
-            # Validate features
-            if np.isfinite(combined_features).all():
-                features.append(combined_features)
-                valid_indices.append(i)
+            features_array = np.array(features)
+            decision_scores = clf.decision_function(features_array)
+            predictions = ['stop' if score > -0.3 else 'bg' for score in decision_scores]
+            for j, pred_idx in enumerate(valid_indices):
+                if predictions[j] != 'stop' and (scores[pred_idx] if pred_idx < len(scores) else 0) < 0.95:
+                    continue
+                x, y, w, h = bounding_boxes[pred_idx]
+                label = 'STOP'
+                should_validate_histogram = False
+                if predictions[j] == 'stop' and not skip_histogram:
+                    should_validate_histogram = True
+                elif predictions[j] != 'stop' and validate_bg:
+                    should_validate_histogram = True
+                chip_hist = None
+                if should_validate_histogram:
+                    try:
+                        chip_wb = extract_chip_with_padding(wb_full_img, x, y, w, h, target_size=128, padding_ratio=0.0, keep_aspect_ratio=False)
+                        chip_hist = extract_color_histogram(chip_wb).astype(float)
+                    except Exception:
+                        chip_hist = None
+                    if _color_signatures and 'stop' in _color_signatures and chip_hist is not None:
+                        try:
+                            all_within = validate_histogram_against_signature(
+                                chip_hist,
+                                _color_signatures['stop'],
+                                primary_bins=6,
+                                std_multiplier=1.5,
+                                presence_epsilon=0.01,
+                                require_ratio=True,
+                            )
+                            if all_within:
+                                label = 'STOP'
+                            else:
+                                label = 'OTHER'
+                        except Exception as e:
+                            logging.debug(f"Error checking color histogram: {e}")
+                            label = 'STOP'
+                color = (0, 255, 0) if label == 'STOP' else (0, 165, 255)
+                num_detections += 1
+                label_key = 'stop' if label == 'STOP' else 'other'
+                label_counts[label_key] += 1
+                detected_labels.append(label)
+                detected_boxes.append((x, y, w, h))
+                if output_path and file_name:
+                    from utils import save_chip
+                    save_chip(output_path, os.path.splitext(file_name)[0], num_detections, results[pred_idx], label=label)
+                orig_img = cv2.rectangle(orig_img, (x, y), (x + w, y + h), color, 2)
+                cv2.putText(orig_img, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                if draw_hist and chip_hist is not None and len(chip_hist) >= 6:
+                    draw_histogram_overlay(orig_img, chip_hist, x, y, w, color)
         except Exception as e:
-            logging.debug(f"Skipping invalid chip at index {i}: {e}")
-            continue
-    if len(features) == 0:
-        # No valid features extracted
+            logging.error(f"Error during classification: {e}")
         if return_labels:
             return orig_img, num_detections, detected_boxes, label_counts, detected_labels
         return orig_img, num_detections, detected_boxes, label_counts
-    try:
-        features_array = np.array(features)
-        # Use decision_function for more control over threshold
-        # For SVC with RBF kernel, decision_function gives distance from hyperplane
-        decision_scores = clf.decision_function(features_array)
-        # Low threshold to favor recall (reduce false negatives)
-        # Negative threshold allows more borderline cases to be classified as 'stop'
-        predictions = ['stop' if score > -0.3 else 'bg' for score in decision_scores]
-        logging.debug(f"Decision scores range: [{decision_scores.min():.2f}, {decision_scores.max():.2f}]")
-        for j, pred_idx in enumerate(valid_indices):
-            # Evaluate all high-shape-score candidates even if HOG says 'bg'
-            # Keep HOG gate for lower-score boxes to control false positives
-            if predictions[j] != 'stop' and (scores[pred_idx] if pred_idx < len(scores) else 0) < 0.95:
-                continue
-
-            x, y, w, h = bounding_boxes[pred_idx]
-
-            # Default: assume STOP unless histogram validation says otherwise
-            label = 'STOP'
-
-            # Only apply histogram validation to STOP predictions unless validate_bg is enabled
-            should_validate_histogram = False
-            if predictions[j] == 'stop' and not skip_histogram:
-                should_validate_histogram = True
-            elif predictions[j] != 'stop' and validate_bg:
-                should_validate_histogram = True
-
-            chip_hist = None
-            if should_validate_histogram:
-                # Extract chip histogram using centralized function
-                try:
-                    chip_wb = extract_chip_with_padding(wb_full_img, x, y, w, h, target_size=128, padding_ratio=0.0, keep_aspect_ratio=False)
-                    chip_hist = extract_color_histogram(chip_wb).astype(float)
-                except Exception:
-                    chip_hist = None
-
-                # If we have color signatures for 'stop', check all color bins
-                if _color_signatures and 'stop' in _color_signatures and chip_hist is not None:
-                    try:
-                        all_within = validate_histogram_against_signature(
-                            chip_hist,
-                            _color_signatures['stop'],
-                            primary_bins=6,
-                            std_multiplier=1.5,
-                            presence_epsilon=0.01,
-                            require_ratio=True,
-                        )
-
-                        if all_within:
-                            label = 'STOP'
-                        else:
-                            label = 'OTHER'
-                    except Exception as e:
-                        logging.debug(f"Error checking color histogram: {e}")
-                        label = 'STOP'  # Default to accepting if check fails
-
-            # Record and draw: count both STOP and OTHER as detections; label distinguishes type
-            color = (0, 255, 0) if label == 'STOP' else (0, 165, 255)
-            num_detections += 1
-            label_key = 'stop' if label == 'STOP' else 'other'
-            label_counts[label_key] += 1
-            detected_labels.append(label)
-            detected_boxes.append((x, y, w, h))
-            if output_path and file_name:
-                from utils import save_chip
-                save_chip(output_path, os.path.splitext(file_name)[0], num_detections, results[pred_idx], label=label)
-
-            # Always draw the box/labels for visibility
-            orig_img = cv2.rectangle(orig_img, (x, y), (x + w, y + h), color, 2)
-            cv2.putText(orig_img, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-            # Optionally draw histogram values vertically on the right side
-            if draw_hist and chip_hist is not None and len(chip_hist) >= 6:
-                draw_histogram_overlay(orig_img, chip_hist, x, y, w, color)
-    except Exception as e:
-        logging.error(f"Error during classification: {e}")
-    if return_labels:
-        return orig_img, num_detections, detected_boxes, label_counts, detected_labels
-    return orig_img, num_detections, detected_boxes, label_counts
 
 
     

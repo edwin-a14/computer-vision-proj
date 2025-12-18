@@ -28,22 +28,19 @@ def extract_color_histogram_features(img):
     return color_features
 
 def extract_improved_features(img):
-    # Extract HOG features with optimized parameters
+    # No white balance applied
+    hsv_img = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     hog_features = hog(
-        img,
-        orientations=9,           
-        pixels_per_cell=(8, 8),   
-        cells_per_block=(2, 2),   
-        block_norm='L2-Hys',      
-        channel_axis=2,           
+        hsv_img,
+        orientations=9,
+        pixels_per_cell=(8, 8),
+        cells_per_block=(2, 2),
+        block_norm='L2-Hys',
+        channel_axis=2,
         feature_vector=True
     )
-    
     color_features = extract_color_histogram_features(img)
-    
-    # Combine HOG and color features
     combined_features = np.concatenate([hog_features, color_features])
-    
     return combined_features
 
 # Loads chip images by split, then gets improved features from each image
