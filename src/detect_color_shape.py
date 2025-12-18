@@ -239,7 +239,7 @@ def detect_single_scale(img, min_area, max_area, shape_threshold=0.25, debug_ctx
     return candidates
 
 
-def detect_multiscale(orig_img, scales=[0.5, 0.8, 1.0, 1.2], debug_ctx: Optional[dict] = None, combined_mask_only=False, skip_wb: bool = False):
+def detect_multiscale(orig_img, scales=[0.3, 0.5, 0.7, 0.9, 1.0, 1.2, 1.5, 1.8], debug_ctx: Optional[dict] = None, combined_mask_only=False, skip_wb: bool = False):
     # Detect traffic signs at multiple scales for better small/large sign detection.
 
     img_height, img_width = orig_img.shape[:2]
@@ -417,7 +417,7 @@ def extract_chip_with_padding(img, x, y, w, h, target_size=128, padding_ratio=0.
 def main(classifier_type: str = 'hog', cnn_model_path: Optional[str] = None, 
          cnn_threshold: float = 0.5, debug_shape: bool = False, draw_hist: bool = False, debug_mask: bool = False,
          skip_wb: bool = False, skip_histogram: bool = False, validate_bg: bool = False,
-         combined_mask_only: bool = False):
+         use_combined_mask: bool = False):
     
     import time
     start_time = time.time()
@@ -537,7 +537,7 @@ def main(classifier_type: str = 'hog', cnn_model_path: Optional[str] = None,
                 classifier_type=classifier_type, cnn_threshold=cnn_threshold,
                 debug_shape=debug_shape, draw_hist=draw_hist, debug_mask=debug_mask,
                 skip_wb=skip_wb, skip_histogram=skip_histogram, validate_bg=validate_bg,
-                combined_mask_only=combined_mask_only
+                use_combined_mask=use_combined_mask
             )
             num_detections = label_counts['stop'] + label_counts['other']
             if num_detections > 0:
@@ -575,7 +575,7 @@ def detect_and_classify_frame(orig_img, clf, classifier_type='hog', cnn_threshol
     bounding_boxes = []
     detection_scores = []
     if scales is None:
-        scales = [0.3, 0.6, 1.0, 1.4]
+        scales = [0.3, 0.5, 0.7, 0.9, 1.0, 1.2, 1.5, 1.8]
     debug_ctx = None
     if debug_mask and output_path and file_name:
         debug_dir = os.path.join(output_path, 'debug_masks')
