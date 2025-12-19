@@ -70,7 +70,7 @@ python3 src/cnn_baseline.py \
 python3 src/detect_color_shape.py \
     --classifier cnn \
     --cnn-model computations/cnn_checkpoints/best_model.pth \
-    --threshold 0.4
+    --threshold 0.3
 
 # HOG-SVM
 python3 src/detect_color_shape.py --classifier hog
@@ -79,7 +79,8 @@ python3 src/detect_color_shape.py --classifier hog
 python3 src/detect_color_shape.py \
     --classifier ensemble \
     --cnn-model computations/cnn_checkpoints/best_model.pth \
-    --threshold 0.4
+    --threshold 0.4 \
+    --cnn-extra-confidence 0.9
 ```
 
 
@@ -113,26 +114,31 @@ Mining "hard negatives" (i.e. false positives) from our detections and add them 
 ### 8. Video Processing
 
 ```bash
-python src/process_video.py 
-    --input data/raw/videos/DrivingClip1.mp4 
-    --output data/processed/videos 
-    --classifier hog 
-    --width 800 
-    --skip 3
+python src/process_video.py \
+    --input data/raw/videos/DrivingClip1.mp4 \
+    --output data/processed/videos \
+    --classifier hog \
+    --width 800 \
+    --skip 3 \
+    --skip-wb \
+    --skip-hist 
 
-python src/process_video.py 
-    --input data/raw/videos/DrivingClip1.mp4 
-    --output data/processed/videos 
-    --classifier cnn 
-    --width 800 
-    --skip 3
+python src/process_video.py \
+    --input data/raw/videos/DrivingClip1.mp4 \
+    --output data/processed/videos \
+    --classifier cnn \
+    --width 800 \
+    --skip 3 \
+    --skip-wb
 
-python src/process_video.py 
-    --input data/raw/videos/DrivingClip1.mp4 
-    --output data/processed/videos 
-    --classifier ensemble 
-    --width 800 
-    --skip 3
+python src/process_video.py \
+    --input data/raw/videos/DrivingClip1.mp4 \
+    --output data/processed/videos \
+    --classifier ensemble \
+    --width 800 \
+    --skip 3 \
+    --skip-wb \
+    --skip-hist
 ```
 
 ### 9. Web Interface (Real-time)

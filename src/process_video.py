@@ -122,7 +122,7 @@ def main():
     parser.add_argument('--classifier', default='ensemble', choices=['ensemble', 'cnn', 'hog'])
     parser.add_argument('--skip', type=int, default=2, help='Process every Nth frame (default: 2)')
     parser.add_argument('--width', type=int, default=None, help='Resize video to this width (e.g. 800)')
-    parser.add_argument('--skip-wb', action='store_true', default=True, help='Skip white balance preprocessing (default: skip WB)')
+    parser.add_argument('--skip-wb', action='store_true', default=False, help='Skip white balance preprocessing (default: skip WB)')
     parser.add_argument('--skip-histogram', action='store_true', default=False, help='Skip histogram validation gating (default: do NOT skip)')
     parser.add_argument('--combined-mask-only', action='store_true', default=False, help='Use only the combined mask for detection (default: use all masks)')
     parser.add_argument('--validate-bg', action='store_true', default=False, help='Apply histogram validation to background-classified chips to find additional stops (default: off)')

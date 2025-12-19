@@ -29,9 +29,9 @@ def extract_color_histogram_features(img):
 
 def extract_improved_features(img):
     # No white balance applied
-    hsv_img = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    #hsv_img = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     hog_features = hog(
-        hsv_img,
+        img,
         orientations=9,
         pixels_per_cell=(8, 8),
         cells_per_block=(2, 2),

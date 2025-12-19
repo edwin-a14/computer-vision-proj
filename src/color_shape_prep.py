@@ -199,6 +199,22 @@ def extract_hsv_histogram(img, h_bins=32, s_bins=32, v_bins=32):
     return np.concatenate([hist_h, hist_s, hist_v])
 
 
+def get_color_mask_integrals(img):
+    """
+    Given a BGR image, compute all color masks and their integral images for fast region histogram extraction.
+    Returns a dict of integral images for each color bin (red, yellow, blue, orange, white, black, green, other).
+    """
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
+    h_hls, l_hls, s_hls = cv2.split(cv2.cvtColor(img, cv2.COLOR_BGR2HLS))
+    masks = build_color_masks(h, s, v, l_hls, img)
+    integral_masks = {k: cv2.integral(masks[k].astype(np.uint8)) for k in ['red_mask','yellow_mask','blue_mask','orange_mask','white_mask','black_mask','green_mask']}
+    specific_color_mask = masks['red_mask'] | masks['yellow_mask'] | masks['blue_mask'] | masks['orange_mask'] | masks['green_mask'] | masks['white_mask'] | masks['black_mask']
+    other_mask = (~specific_color_mask)
+    integral_masks['other_mask'] = cv2.integral(other_mask.astype(np.uint8))
+    return integral_masks
+
+
 def load_chip_images_by_type(chip_base_path, split='train'):
     """
     Load all chip images organized by sign type from disk for a given split.

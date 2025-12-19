@@ -1,50 +1,3 @@
-def save_and_load_all_masks_for_debug(debug_dir, base_prefix):
-    """
-    Load all relevant debug masks (hsv, lab, hsv_wb, lab_wb) for visualization.
-    Returns: hsv_mask, lab_mask, hsv_mask_wb, lab_mask_wb (all as grayscale or None)
-    """
-    import cv2
-    import os
-    def load_mask(path):
-        if os.path.exists(path):
-            return cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-        return None
-    hsv_mask = load_mask(os.path.join(debug_dir, f"{base_prefix}_hsv_mask_1.png"))
-    lab_mask = load_mask(os.path.join(debug_dir, f"{base_prefix}_lab_mask_1.png"))
-    hsv_mask_wb = load_mask(os.path.join(debug_dir, f"{base_prefix}_hsv_mask_wb_1.png"))
-    lab_mask_wb = load_mask(os.path.join(debug_dir, f"{base_prefix}_lab_mask_wb_1.png"))
-    return hsv_mask, lab_mask, hsv_mask_wb, lab_mask_wb
-def save_debug_mask_visualization(debug_dir, base_prefix, final_img, hsv_mask, lab_mask, hsv_mask_wb, lab_mask_wb):
-    """Save a debug visualization of masks and result image."""
-    def to_rgb(mask):
-        if mask is None:
-            img = np.ones((final_img.shape[0], final_img.shape[1], 3), dtype=np.uint8) * 255
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            text = 'MISSING MASK'
-            font_scale = 0.8
-            thickness = 2
-            color = (180, 180, 180)
-            (tw, th), _ = cv2.getTextSize(text, font, font_scale, thickness)
-            x = (img.shape[1] - tw) // 2
-            y = (img.shape[0] + th) // 2
-            cv2.putText(img, text, (x, y), font, font_scale, color, thickness, cv2.LINE_AA)
-            return img
-        if len(mask.shape) == 2:
-            return cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-        return mask
-    h, w = final_img.shape[:2]
-    def resize_to_h(im):
-        return cv2.resize(im, (int(im.shape[1] * h / im.shape[0]), h), interpolation=cv2.INTER_NEAREST) if im.shape[0] != h else im
-    hsv = resize_to_h(to_rgb(hsv_mask))
-    hsv_wb = resize_to_h(to_rgb(hsv_mask_wb))
-    lab = resize_to_h(to_rgb(lab_mask))
-    lab_wb = resize_to_h(to_rgb(lab_mask_wb))
-    imgs = [hsv, hsv_wb, final_img, lab, lab_wb]
-    minw = min(im.shape[1] for im in imgs)
-    imgs = [cv2.resize(im, (minw, h), interpolation=cv2.INTER_NEAREST) if im.shape[1] != minw else im for im in imgs]
-    concat = np.concatenate(imgs, axis=1)
-    debug_vis_path = os.path.join(debug_dir, f"{base_prefix}_mask_debug.png")
-    cv2.imwrite(debug_vis_path, concat)
 import os
 import cv2
 from typing import Optional
@@ -90,6 +43,55 @@ def draw_histogram_overlay(image, chip_hist, x: int, y: int, w: int, color=(0, 2
         cv2.putText(image, f"{lab}:{val:.2f}", (x_offset, y_offset), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
         y_offset += 12
     return image
+
+def save_and_load_all_masks_for_debug(debug_dir, base_prefix):
+    """
+    Load all relevant debug masks (hsv, lab, hsv_wb, lab_wb) for visualization.
+    Returns: hsv_mask, lab_mask, hsv_mask_wb, lab_mask_wb (all as grayscale or None)
+    """
+    import cv2
+    import os
+    def load_mask(path):
+        if os.path.exists(path):
+            return cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        return None
+    hsv_mask = load_mask(os.path.join(debug_dir, f"{base_prefix}_hsv_mask_1.png"))
+    lab_mask = load_mask(os.path.join(debug_dir, f"{base_prefix}_lab_mask_1.png"))
+    hsv_mask_wb = load_mask(os.path.join(debug_dir, f"{base_prefix}_hsv_mask_wb_1.png"))
+    lab_mask_wb = load_mask(os.path.join(debug_dir, f"{base_prefix}_lab_mask_wb_1.png"))
+    return hsv_mask, lab_mask, hsv_mask_wb, lab_mask_wb
+
+def save_debug_mask_visualization(debug_dir, base_prefix, final_img, hsv_mask, lab_mask, hsv_mask_wb, lab_mask_wb):
+    """Save a debug visualization of masks and result image."""
+    def to_rgb(mask):
+        if mask is None:
+            img = np.ones((final_img.shape[0], final_img.shape[1], 3), dtype=np.uint8) * 255
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            text = 'MISSING MASK'
+            font_scale = 0.8
+            thickness = 2
+            color = (180, 180, 180)
+            (tw, th), _ = cv2.getTextSize(text, font, font_scale, thickness)
+            x = (img.shape[1] - tw) // 2
+            y = (img.shape[0] + th) // 2
+            cv2.putText(img, text, (x, y), font, font_scale, color, thickness, cv2.LINE_AA)
+            return img
+        if len(mask.shape) == 2:
+            return cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+        return mask
+    h, w = final_img.shape[:2]
+    def resize_to_h(im):
+        return cv2.resize(im, (int(im.shape[1] * h / im.shape[0]), h), interpolation=cv2.INTER_NEAREST) if im.shape[0] != h else im
+    hsv = resize_to_h(to_rgb(hsv_mask))
+    hsv_wb = resize_to_h(to_rgb(hsv_mask_wb))
+    lab = resize_to_h(to_rgb(lab_mask))
+    lab_wb = resize_to_h(to_rgb(lab_mask_wb))
+    imgs = [hsv, hsv_wb, final_img, lab, lab_wb]
+    minw = min(im.shape[1] for im in imgs)
+    imgs = [cv2.resize(im, (minw, h), interpolation=cv2.INTER_NEAREST) if im.shape[1] != minw else im for im in imgs]
+    concat = np.concatenate(imgs, axis=1)
+    debug_vis_path = os.path.join(debug_dir, f"{base_prefix}_mask_debug.png")
+    cv2.imwrite(debug_vis_path, concat)
 
 
 def chip_path(directory: str, index: int, file_name: str, label: Optional[str] = None):
@@ -331,132 +333,4 @@ def create_compact_visualization_for_image(image_base: str, classifier_dir: str,
             pass
         if log:
             logger.warning(f"[compact] save failed -> {out_path}")
-        return None
-
-    cand_images = []
-    if os.path.exists(cand_dir):
-        files = [f for f in os.listdir(cand_dir) if f.endswith('.png')]
-        files.sort()
-        for f in files[:max_candidates]:
-            cand_images.append(_safe_imread(os.path.join(cand_dir, f)))
-    cand_montage = _make_montage(cand_images, tile_h=128, tile_w=128, cols=6)
-
-    result_img = _safe_imread(result_path)
-    result_rgb = None
-    if result_img is not None:
-        result_rgb = cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB)
-    if log:
-        logger.info(f"[compact] result={'y' if result_rgb is not None else 'n'}")
-
-    # Build figure using GridSpec to avoid squashing
-    # Shrink canvas and tighten spacing
-    fig = plt.figure(figsize=(11, 7.5), dpi=150)
-    fig.patch.set_facecolor('white')
-    # Three rows: masks (top), result (middle), chips single row (bottom)
-    gs = gridspec.GridSpec(3, 3, height_ratios=[1, 1, 0.7], width_ratios=[1, 1, 1], hspace=0.15, wspace=0.08)
-
-    # Top row: masks
-    for i in range(3):
-        ax = fig.add_subplot(gs[0, i])
-        ax.axis('off')
-        if i < len(masks):
-            img, title = masks[i]
-            ax.imshow(img)
-            ax.set_title(title, fontsize=10)
-        else:
-            ax.text(0.5, 0.5, '', ha='center', va='center')
-
-    # Middle center: result image
-    ax_mid_left = fig.add_subplot(gs[1, 0])
-    ax_mid_left.axis('off')
-    ax_mid_center = fig.add_subplot(gs[1, 1])
-    ax_mid_center.axis('off')
-    ax_mid_right = fig.add_subplot(gs[1, 2])
-    ax_mid_right.axis('off')
-    if result_rgb is not None:
-        ax_mid_center.imshow(result_rgb)
-        ax_mid_center.set_title('Annotated Result', fontsize=10)
-
-    # Bottom row: candidate chips grid
-    # Create up to max_candidates small subplots;
-    # Limit bottom chips similar to detection summaries
-    chip_cols = 4
-    # Prepare three groups corresponding to HSV/LAB/Combined
-    # Gather candidate images per mask source
-    groups = []
-    for subname in ['hsv', 'lab', 'combined']:
-        subdir = os.path.join(cand_dir, subname)
-        grp = []
-        if os.path.exists(subdir):
-            files = [f for f in os.listdir(subdir) if f.endswith('.png')]
-            files.sort()
-            for f in files[:min(len(files), chip_cols)]:
-                im = _safe_imread(os.path.join(subdir, f))
-                if im is None:
-                    continue
-                grp.append(cv2.cvtColor(im, cv2.COLOR_BGR2RGB))
-        groups.append(grp)
-    if log:
-        logger.info(f"[compact] chips: hsv={len(groups[0])}, lab={len(groups[1])}, comb={len(groups[2])}")
-    # Place groups into two stacked rows (rows 2 and 3)
-    # Single bottom row (row index 2): HSV, LAB, Combined
-    # Render fixed-size tiles to keep chip sizes uniform
-    tile_h, tile_w = 64, 64
-    for col_idx, group in enumerate(groups):
-        ax = fig.add_subplot(gs[2, col_idx])
-        ax.axis('off')
-        if group:
-            imgs = group[:chip_cols]
-            tiles = []
-            for img in imgs:
-                try:
-                    h, w = img.shape[:2]
-                    scale = min(tile_w / w, tile_h / h)
-                    new_w = max(1, int(w * scale))
-                    new_h = max(1, int(h * scale))
-                    thumb = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-                    # center on tile
-                    tile = np.ones((tile_h, tile_w, 3), dtype=np.uint8) * 255
-                    y0 = (tile_h - new_h) // 2
-                    x0 = (tile_w - new_w) // 2
-                    tile[y0:y0+new_h, x0:x0+new_w] = thumb
-                    tiles.append(tile)
-                except Exception:
-                    continue
-            if tiles:
-                # pad with blank tiles to ensure constant width
-                while len(tiles) < chip_cols:
-                    tiles.append(np.ones((tile_h, tile_w, 3), dtype=np.uint8) * 255)
-                # insert small white spacers between tiles for separation
-                spacer_w = 6
-                spacer = np.ones((tile_h, spacer_w, 3), dtype=np.uint8) * 255
-                row_parts = []
-                for k, t in enumerate(tiles[:chip_cols]):
-                    row_parts.append(t)
-                    if k < chip_cols - 1:
-                        row_parts.append(spacer)
-                mosaic = np.hstack(row_parts)
-                ax.imshow(mosaic, interpolation='nearest')
-
-    out_path = os.path.join(base_dir, f"{image_base}_compact.png")
-    try:
-        fig.savefig(out_path, bbox_inches='tight')
-        plt.close(fig)
-        if log:
-            logger.info(f"[compact] saved -> {out_path}")
-        return out_path
-    except Exception:
-        try:
-            plt.close(fig)
-        except Exception:
-            pass
-        if log:
-            logger.warning(f"[compact] save failed -> {out_path}")
-        return None
-
-    out_path = os.path.join(base_dir, f"{image_base}_compact.png")
-    try:
-        cv2.imwrite(out_path, diagram)
-        return out_path
-    except Exception:
         return None
