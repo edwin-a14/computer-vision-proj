@@ -40,7 +40,7 @@ def draw_histogram_overlay(image, chip_hist, x: int, y: int, w: int, color=(0, 2
     x_offset = x + w + 5
     y_offset = y + 12
     for lab, val in zip(labels, vals):
-        cv2.putText(image, f"{lab}:{val:.2f}", (x_offset, y_offset), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
+        cv2.putText(image, f"{lab}:{val:.2f}".upper(), (x_offset, y_offset), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
         y_offset += 12
     return image
 
@@ -74,7 +74,7 @@ def save_debug_mask_visualization(debug_dir, base_prefix, final_img, hsv_mask, l
             (tw, th), _ = cv2.getTextSize(text, font, font_scale, thickness)
             x = (img.shape[1] - tw) // 2
             y = (img.shape[0] + th) // 2
-            cv2.putText(img, text, (x, y), font, font_scale, color, thickness, cv2.LINE_AA)
+            cv2.putText(img, text.upper(), (x, y), font, font_scale, color, thickness, cv2.LINE_AA)
             return img
         if len(mask.shape) == 2:
             return cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
@@ -229,7 +229,7 @@ def create_compact_visualization_for_image(image_base: str, classifier_dir: str,
             (tw, th), _ = cv2.getTextSize(text, font, font_scale, thickness)
             x = (img.shape[1] - tw) // 2
             y = (img.shape[0] + th) // 2
-            cv2.putText(img, text, (x, y), font, font_scale, color, thickness, cv2.LINE_AA)
+            cv2.putText(img, text.upper(), (x, y), font, font_scale, color, thickness, cv2.LINE_AA)
             return img
         if len(im.shape) == 2:
             im = cv2.cvtColor(im, cv2.COLOR_GRAY2BGR)

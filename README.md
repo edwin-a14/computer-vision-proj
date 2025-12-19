@@ -70,7 +70,7 @@ python3 src/cnn_baseline.py \
 python3 src/detect_color_shape.py \
     --classifier cnn \
     --cnn-model computations/cnn_checkpoints/best_model.pth \
-    --threshold 0.3
+    --threshold 0.5
 
 # HOG-SVM
 python3 src/detect_color_shape.py --classifier hog
@@ -80,7 +80,7 @@ python3 src/detect_color_shape.py \
     --classifier ensemble \
     --cnn-model computations/cnn_checkpoints/best_model.pth \
     --threshold 0.4 \
-    --cnn-extra-confidence 0.9
+    --cnn-extra-confidence 0.95
 ```
 
 

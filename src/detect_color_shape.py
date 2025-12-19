@@ -629,7 +629,7 @@ def detect_and_classify_frame(orig_img, clf, classifier_type='hog', cnn_threshol
         for idx, (chip, score, src) in enumerate(zip(results, final_scores, candidate_sources), start=1):
             chip_annot = chip.copy()
             try:
-                cv2.putText(chip_annot, f"shape:{score:.2f}", (4, 12), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+                cv2.putText(chip_annot, f"shape:{score:.2f}".upper(), (4, 12), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
                 if draw_hist:
                     try:
                         bx, by, bw, bh = bounding_boxes[idx-1] if idx-1 < len(bounding_boxes) else (0,0,chip.shape[1], chip.shape[0])
@@ -638,7 +638,7 @@ def detect_and_classify_frame(orig_img, clf, classifier_type='hog', cnn_threshol
                         labels = ['R','Y','B','O','W','K']
                         y_off = 24
                         for lab, val in zip(labels, hist[:6]):
-                            cv2.putText(chip_annot, f"{lab}:{val:.2f}", (4, y_off), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255,255,255), 1)
+                            cv2.putText(chip_annot, f"{lab}:{val:.2f}".upper(), (4, y_off), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255,255,255), 1)
                             y_off += 12
                     except Exception:
                         pass
@@ -692,7 +692,7 @@ def process_single_image(road_sign_image, directory_path, results_path, clf,
         x, y, w, h = box
         color = (0, 255, 0) if label.lower() == 'stop' else (0, 165, 255)
         cv2.rectangle(final_img, (x, y), (x + w, y + h), color, 2)
-        cv2.putText(final_img, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        cv2.putText(final_img, label.upper(), (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
         if label in VALID_LABELS:
             label_counts[label] += 1
         else:
@@ -870,7 +870,7 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
                     label_text = matched_label.upper()
                     if debug_cnn_conf:
                         label_text += f" ({cnn_conf:.2f})"
-                    cv2.putText(orig_img, label_text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                    cv2.putText(orig_img, label_text.upper(), (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                     if draw_hist and chip_hist is not None and len(chip_hist) >= 6:
                         draw_histogram_overlay(orig_img, chip_hist, x, y, w, color)
         except Exception as e:
@@ -951,7 +951,7 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
                         from utils import save_chip
                         save_chip(output_path, os.path.splitext(file_name)[0], num_detections, results[i], label=label)
                     orig_img = cv2.rectangle(orig_img, (bounding_boxes[i][0], bounding_boxes[i][1]), (bounding_boxes[i][0] + bounding_boxes[i][2], bounding_boxes[i][1] + bounding_boxes[i][3]), color, 2)
-                    cv2.putText(orig_img, label, (bounding_boxes[i][0], bounding_boxes[i][1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                    cv2.putText(orig_img, label.upper(), (bounding_boxes[i][0], bounding_boxes[i][1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                     if draw_hist and chip_hist is not None and len(chip_hist) >= 6:
                         draw_histogram_overlay(orig_img, chip_hist, bounding_boxes[i][0], bounding_boxes[i][1], bounding_boxes[i][2], color)
         except Exception as e:
@@ -989,7 +989,7 @@ def test(results: list, bounding_boxes: list, scores: list, orig_img, clf, class
                 detected_labels.append(label)
                 detected_boxes.append(bounding_boxes[i])
                 if debug_cnn_conf:
-                    orig_img =  cv2.putText(orig_img, confs[i], (bounding_boxes[i][0], bounding_boxes[i][1] + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    orig_img =  cv2.putText(orig_img, str(confs[i]).upper(), (bounding_boxes[i][0], bounding_boxes[i][1] + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                 if output_path and file_name:
                     from utils import save_chip
                     save_chip(output_path, os.path.splitext(file_name)[0], num_detections, results[i], label=label)
